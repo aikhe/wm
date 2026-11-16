@@ -2,6 +2,7 @@ mod cloak;
 mod events;
 mod layout;
 mod manager;
+mod overview;
 mod rules;
 mod window;
 

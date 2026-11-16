@@ -6,17 +6,19 @@ use windows::Win32::Foundation::{LPARAM, RECT, WPARAM};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, VIRTUAL_KEY,
+    GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, MSG, PostThreadMessageW, SPI_GETWORKAREA, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, WM_HOTKEY, WM_QUIT,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_PAINT, WM_QUIT,
 };
 use windows::core::{BOOL, Result};
 
 use crate::cloak::{self, Cloaker};
 use crate::events::{self, Event};
 use crate::layout::{Direction, Mode, Placement, Rect, Width, Workspaces};
+use crate::overview::{Overview, Target};
 use crate::rules::{Rule, Rules};
 use crate::window::{Snapshot, Window};
 
@@ -34,6 +36,7 @@ enum Action {
     Resize(i32),
     ToggleFull,
     Toggle(Mode),
+    Overview,
     Close,
     Quit,
 }
@@ -41,7 +44,7 @@ enum Action {
 const ALT_SHIFT: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_SHIFT.0);
 const CTRL_ALT_SHIFT: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_CONTROL.0 | ALT_SHIFT.0);
 
-const BINDINGS: [(HOT_KEY_MODIFIERS, VIRTUAL_KEY, Action); 35] = [
+const BINDINGS: [(HOT_KEY_MODIFIERS, VIRTUAL_KEY, Action); 36] = [
     (
         MOD_ALT,
         VIRTUAL_KEY(b'H' as u16),
@@ -119,6 +122,7 @@ const BINDINGS: [(HOT_KEY_MODIFIERS, VIRTUAL_KEY, Action); 35] = [
         VIRTUAL_KEY(b'T' as u16),
         Action::Toggle(Mode::OnTop),
     ),
+    (MOD_ALT, VIRTUAL_KEY(b'O' as u16), Action::Overview),
     (ALT_SHIFT, VIRTUAL_KEY(b'W' as u16), Action::Close),
     (ALT_SHIFT, VIRTUAL_KEY(b'E' as u16), Action::Quit),
 ];
@@ -140,11 +144,22 @@ pub fn run() -> Result<()> {
     println!(
         "Alt+T float, Alt+Shift+T sticky, Ctrl+Alt+Shift+T on top. Alt+R/-/= width, Alt+F full."
     );
-    println!("Alt+Shift+W close, Alt+Shift+E quit and restore.");
+    println!("Alt+O overview, Alt+Shift+W close, Alt+Shift+E quit and restore.");
     let mut message = MSG::default();
     while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+        let in_overview = manager.overview.owns(&message);
         let action = match message.message {
             WM_HOTKEY => BINDINGS.get(message.wParam.0).map(|(_, _, action)| *action),
+            WM_KEYDOWN if in_overview => overview_action(VIRTUAL_KEY(message.wParam.0 as u16)),
+            WM_LBUTTONDOWN if in_overview => {
+                let point = message.lParam.0;
+                manager.click(i32::from(point as i16), i32::from((point >> 16) as i16));
+                None
+            }
+            WM_PAINT if in_overview => {
+                manager.overview.paint();
+                None
+            }
             events::MESSAGE => {
                 if let Some(event) = Event::from_message(&message) {
                     manager.handle(event);
@@ -158,6 +173,30 @@ pub fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The action for a key pressed in the overview. Every hotkey works there
+/// without Alt, the arrow keys stand in for H/J/K/L, and Enter or Escape
+/// closes it. Quitting still takes the whole hotkey.
+fn overview_action(key: VIRTUAL_KEY) -> Option<Action> {
+    let key = match key.0 {
+        0x25 => VIRTUAL_KEY(b'H' as u16),
+        0x28 => VIRTUAL_KEY(b'J' as u16),
+        0x26 => VIRTUAL_KEY(b'K' as u16),
+        0x27 => VIRTUAL_KEY(b'L' as u16),
+        13 | 27 => VIRTUAL_KEY(b'O' as u16),
+        _ => key,
+    };
+    let held = |key| unsafe { GetKeyState(key) } < 0;
+    let modifiers = [(0x10, MOD_SHIFT), (0x11, MOD_CONTROL)]
+        .into_iter()
+        .filter(|(key, _)| held(*key))
+        .fold(MOD_ALT, |all, (_, modifier)| all | modifier);
+    BINDINGS
+        .into_iter()
+        .find(|(wanted, bound, _)| (*wanted, *bound) == (modifiers, key))
+        .map(|(_, _, action)| action)
+        .filter(|action| !matches!(action, Action::Quit))
 }
 
 /// Runs on a thread Windows creates for Ctrl+C or a closing console.
@@ -181,6 +220,7 @@ struct Manager {
     /// The mode and width each kind of window was last given, which new ones
     /// open with.
     rules: Rules,
+    overview: Overview,
 }
 
 impl Manager {
@@ -192,6 +232,7 @@ impl Manager {
             placed: Vec::new(),
             untiled: Vec::new(),
             rules: Rules::load(),
+            overview: Overview::new()?,
         };
         // A run that was killed leaves its off-screen windows cloaked, and
         // cloaked windows aren't adopted.
@@ -227,9 +268,23 @@ impl Manager {
             Action::Resize(sign) => self.layout.resize(sign),
             Action::ToggleFull => self.layout.toggle_full(),
             Action::Toggle(mode) => self.toggle(mode),
+            Action::Overview => {
+                if self.overview.is_open() {
+                    self.close_overview();
+                } else {
+                    self.overview.open();
+                }
+                true
+            }
             Action::Close => {
-                // Never close the desktop or an unmanaged window.
-                let target = Window::foreground().filter(|window| self.layout.contains(*window));
+                // Only a window of ours: the desktop can have focus too, and
+                // closing that asks to shut Windows down. While the overview
+                // has the keyboard, it's the window highlighted there.
+                let ours = Window::foreground().filter(|window| self.layout.contains(*window));
+                let target = match self.overview.is_open() {
+                    true => self.layout.focused(),
+                    false => ours,
+                };
                 if let Some(window) = target {
                     window.close();
                 }
@@ -285,6 +340,10 @@ impl Manager {
             // one that ends up focused; only that last one matters.
             Event::Focused(window) => {
                 let current = Window::foreground() == Some(window);
+                // Another window taking the keyboard ends the overview.
+                if current && self.overview.is_open() {
+                    self.overview.close();
+                }
                 let focused = current && self.layout.focus(window);
                 if focused && self.layout.mode(window) == Some(Mode::Tiled) {
                     self.raise_floating();
@@ -350,14 +409,39 @@ impl Manager {
     }
 
     /// Gives keyboard focus to the layout's focused window, or to the desktop
-    /// on an empty workspace so that no hidden window keeps it.
+    /// on an empty workspace so that no hidden window keeps it. The overview
+    /// keeps the keyboard for as long as it's open.
     fn focus_layout(&self) {
-        self.focus_target().focus();
+        if !self.overview.is_open() {
+            self.focus_target().focus();
+        }
     }
 
-    /// The window that should have keyboard focus.
+    /// The window the keyboard belongs to when the overview doesn't have it.
     fn focus_target(&self) -> Window {
         self.layout.focused().unwrap_or_else(Window::desktop)
+    }
+
+    /// Hands the keyboard back, then hides the overview. In that order:
+    /// hiding the window that has the keyboard leaves Windows to choose the
+    /// next one.
+    fn close_overview(&mut self) {
+        self.focus_target().focus();
+        self.overview.close();
+    }
+
+    /// Goes to the window or workspace clicked in the overview and closes
+    /// it. A click on nothing only closes it.
+    fn click(&mut self, x: i32, y: i32) {
+        match self.overview.target(x, y) {
+            Some(Target::Window(window)) => self.layout.focus(window),
+            Some(Target::Workspace(index)) => self.layout.focus_workspace(index),
+            None => false,
+        };
+        // The windows are put in place before the one clicked takes focus.
+        self.apply();
+        self.close_overview();
+        self.log("Click");
     }
 
     /// Puts the floating windows on screen back above the tiled ones. A tiled
@@ -458,6 +542,7 @@ impl Manager {
                 self.placed.push((window, rect));
             }
         }
+        self.overview.show(&self.layout);
     }
 }
 

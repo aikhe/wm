@@ -11,6 +11,22 @@ pub struct Rect {
     pub height: i32,
 }
 
+impl Rect {
+    /// The rectangle with `margin` taken off every side.
+    pub fn inset(self, margin: i32) -> Rect {
+        Rect {
+            x: self.x + margin,
+            y: self.y + margin,
+            width: self.width - 2 * margin,
+            height: self.height - 2 * margin,
+        }
+    }
+
+    pub fn contains(self, x: i32, y: i32) -> bool {
+        (self.x..self.x + self.width).contains(&x) && (self.y..self.y + self.height).contains(&y)
+    }
+}
+
 /// Left and right act on columns, up and down on workspaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {

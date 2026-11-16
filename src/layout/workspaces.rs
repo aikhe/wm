@@ -92,6 +92,11 @@ impl<W: Copy + PartialEq> Workspaces<W> {
         (self.active, self.stack.len())
     }
 
+    /// The part of the screen that tiled windows fill.
+    pub fn viewport(&self) -> Rect {
+        self.viewport
+    }
+
     /// The focused window: a floating one, or else the focused column of the
     /// workspace on screen.
     pub fn focused(&self) -> Option<W> {

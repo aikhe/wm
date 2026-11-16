@@ -275,6 +275,17 @@ fn text(read: impl FnOnce(&mut [u16]) -> i32) -> String {
     String::from_utf16_lossy(&buffer[..len])
 }
 
+impl From<Rect> for RECT {
+    fn from(rect: Rect) -> Self {
+        RECT {
+            left: rect.x,
+            top: rect.y,
+            right: rect.x + rect.width,
+            bottom: rect.y + rect.height,
+        }
+    }
+}
+
 impl From<RECT> for Rect {
     fn from(rect: RECT) -> Self {
         Rect {
