@@ -20,11 +20,43 @@ pub enum Direction {
     Down,
 }
 
+/// How a window is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// A column in a strip.
+    Tiled,
+    /// Left wherever it is, above the strip of one workspace.
+    Floating,
+    /// Floating on every workspace.
+    Sticky,
+    /// Sticky, and above every other window.
+    OnTop,
+}
+
+impl Mode {
+    /// The mode a window in this one goes to when the key for `target` is
+    /// pressed. A tiled window goes into the target. The floating key tiles
+    /// any other window, and the rest turn themselves back off, which leaves
+    /// the window floating.
+    pub fn toggled(self, target: Mode) -> Mode {
+        match (self, target) {
+            (Mode::Tiled, _) => target,
+            (_, Mode::Floating) => Mode::Tiled,
+            _ if self == target => Mode::Floating,
+            _ => target,
+        }
+    }
+}
+
 /// Where a window goes, and whether it should be drawn there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placement<W> {
     pub window: W,
-    pub rect: Rect,
+    /// The workspace it belongs to, counted from zero at the top. A window
+    /// that shows on every workspace reports the one on screen.
+    pub workspace: usize,
+    /// `None` for a floating window, which stays wherever it was put.
+    pub rect: Option<Rect>,
     pub visible: bool,
 }
 
@@ -54,9 +86,17 @@ type Fraction = (i32, i32);
 const WIDTHS: [Fraction; 3] = [(1, 3), (1, 2), (2, 3)];
 const DEFAULT_WIDTH: Fraction = (1, 2);
 
+/// How wide a column is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Width {
+    pub pixels: i32,
+    /// Fills the viewport for now, whatever `pixels` says, and returns to it.
+    pub full: bool,
+}
+
 struct Column<W> {
     window: W,
-    width: i32,
+    width: Width,
 }
 
 /// A row of full-height columns that can be wider than the screen. The viewport
@@ -95,9 +135,26 @@ impl<W: Copy + PartialEq> Strip<W> {
         self.columns.get(self.focused).map(|column| column.window)
     }
 
-    /// Adds a default-width column for the window. See `insert_column`.
-    fn insert(&mut self, window: W) {
-        let width = self.width(DEFAULT_WIDTH);
+    /// The width of the window's column, or `None` if it isn't in the strip.
+    fn width(&self, window: W) -> Option<Width> {
+        let index = self.position(window)?;
+        Some(self.columns[index].width)
+    }
+
+    /// Adds a column for the window at the given width, kept within what
+    /// fits, or at the default one. See `insert_column`.
+    fn insert(&mut self, window: W, width: Option<Width>) {
+        let (narrowest, widest) = self.limits();
+        let width = match width {
+            Some(width) => Width {
+                pixels: width.pixels.clamp(narrowest, widest),
+                ..width
+            },
+            None => Width {
+                pixels: self.preset(DEFAULT_WIDTH).clamp(narrowest, widest),
+                full: false,
+            },
+        };
         self.insert_column(Column { window, width });
     }
 
@@ -161,21 +218,34 @@ impl<W: Copy + PartialEq> Strip<W> {
     /// Steps the focused column to the next wider preset, wrapping round to
     /// the narrowest. Returns `false` if the strip is empty.
     fn cycle_width(&mut self) -> bool {
-        let Some(current) = self.columns.get(self.focused).map(|column| column.width) else {
+        let presets = WIDTHS.map(|fraction| self.preset(fraction));
+        let wider = |pixels| presets.into_iter().find(|preset| *preset > pixels);
+        self.rewidth(|pixels| wider(pixels).unwrap_or(presets[0]))
+    }
+
+    /// Widens the focused column by a percentage of the viewport, or narrows
+    /// it when negative, between a tenth of the viewport and all of it.
+    /// Returns `false` if the width didn't change.
+    fn resize(&mut self, percent: i32) -> bool {
+        let (narrowest, widest) = self.limits();
+        let step = self.viewport.width * percent / 100;
+        self.rewidth(|pixels| (pixels + step).clamp(narrowest, widest))
+    }
+
+    /// Makes the focused column fill the viewport, or puts it back to the
+    /// width it had. Returns `false` if the strip is empty.
+    fn toggle_full(&mut self) -> bool {
+        let Some(column) = self.columns.get_mut(self.focused) else {
             return false;
         };
-        let presets = WIDTHS.map(|fraction| self.width(fraction));
-        let next = presets
-            .into_iter()
-            .find(|width| *width > current)
-            .unwrap_or(presets[0]);
-        self.columns[self.focused].width = next;
+        column.width.full = !column.width.full;
         self.reveal_focused();
         true
     }
 
     /// Where every window goes. Columns scrolled out of view get rectangles
-    /// beyond the viewport's edges and aren't visible.
+    /// beyond the viewport's edges and aren't visible. A strip doesn't know
+    /// its place in the stack, so `workspace` is left for `Workspaces` to set.
     fn placements(&self) -> impl Iterator<Item = Placement<W>> {
         let (start, end) = (self.viewport.x, self.viewport.x + self.viewport.width);
         let mut left = start + self.gap - self.scroll;
@@ -184,14 +254,15 @@ impl<W: Copy + PartialEq> Strip<W> {
             let rect = Rect {
                 x: left,
                 y: self.viewport.y + self.gap,
-                width: column.width,
+                width: self.span(column),
                 height: self.viewport.height - 2 * self.gap,
             };
-            left += column.width + self.gap;
+            left += rect.width + self.gap;
             let visible = rect.x < end && rect.x + rect.width > start;
             Placement {
                 window: column.window,
-                rect,
+                workspace: 0,
+                rect: Some(rect),
                 visible,
             }
         })
@@ -216,8 +287,44 @@ impl<W: Copy + PartialEq> Strip<W> {
 
     /// Sized so that columns whose fractions add up to one fill the viewport
     /// exactly, gaps included.
-    fn width(&self, (numerator, denominator): Fraction) -> i32 {
-        (self.viewport.width - self.gap) * numerator / denominator - self.gap
+    fn preset(&self, (numerator, denominator): Fraction) -> i32 {
+        ((i64::from(self.viewport.width - self.gap) * i64::from(numerator))
+            / i64::from(denominator)) as i32
+            - self.gap
+    }
+
+    /// The narrowest and widest a column can be: a tenth of the viewport, and
+    /// all of it with a gap each side.
+    fn limits(&self) -> (i32, i32) {
+        (
+            (self.viewport.width * 10 / 100).max(1),
+            self.viewport.width - 2 * self.gap,
+        )
+    }
+
+    /// How wide the column is drawn.
+    fn span(&self, column: &Column<W>) -> i32 {
+        if column.width.full {
+            self.limits().1
+        } else {
+            column.width.pixels
+        }
+    }
+
+    /// Sets the focused column's width from the one it's drawn at, so a full
+    /// column stops being full. Returns `false` if nothing changed.
+    fn rewidth(&mut self, change: impl FnOnce(i32) -> i32) -> bool {
+        let Some(column) = self.columns.get(self.focused) else {
+            return false;
+        };
+        let width = Width {
+            pixels: change(self.span(column)),
+            full: false,
+        };
+        let changed = width != column.width;
+        self.columns[self.focused].width = width;
+        self.reveal_focused();
+        changed
     }
 
     /// Scrolls the least distance that puts the focused column, with a gap on
@@ -229,9 +336,9 @@ impl<W: Copy + PartialEq> Strip<W> {
         };
         let before: i32 = self.columns[..self.focused]
             .iter()
-            .map(|c| c.width + self.gap)
+            .map(|earlier| self.span(earlier) + self.gap)
             .sum();
-        let after = before + column.width + 2 * self.gap;
+        let after = before + self.span(column) + 2 * self.gap;
         // A column wider than the viewport aligns to its left edge.
         self.scroll = self.scroll.max(after - self.viewport.width).min(before);
     }
@@ -250,15 +357,37 @@ mod tests {
 
     fn strip(windows: impl IntoIterator<Item = u32>) -> Strip<u32> {
         let mut strip = Strip::new(VIEWPORT, 10);
-        windows.into_iter().for_each(|window| strip.insert(window));
+        windows
+            .into_iter()
+            .for_each(|window| strip.insert(window, None));
         strip
     }
 
-    fn xs(strip: &Strip<u32>) -> Vec<i32> {
+    #[test]
+    fn a_column_opens_at_a_remembered_width_that_fits() {
+        let mut strip = strip([]);
+        let remembered = |pixels| Width {
+            pixels,
+            full: false,
+        };
+        strip.insert(1, Some(remembered(700)));
+        strip.insert(2, Some(remembered(5000)));
+        assert_eq!(widths(&strip), [700, 980]);
+    }
+
+    fn rects(strip: &Strip<u32>) -> Vec<Rect> {
         strip
             .placements()
-            .map(|placement| placement.rect.x)
+            .filter_map(|placement| placement.rect)
             .collect()
+    }
+
+    fn xs(strip: &Strip<u32>) -> Vec<i32> {
+        rects(strip).into_iter().map(|rect| rect.x).collect()
+    }
+
+    fn widths(strip: &Strip<u32>) -> Vec<i32> {
+        rects(strip).into_iter().map(|rect| rect.width).collect()
     }
 
     fn order(strip: &Strip<u32>) -> Vec<u32> {
@@ -270,17 +399,13 @@ mod tests {
 
     #[test]
     fn two_columns_fill_the_viewport() {
-        let rects: Vec<_> = strip([1, 2])
-            .placements()
-            .map(|placement| placement.rect)
-            .collect();
         let column = |x| Rect {
             x,
             y: 10,
             width: 485,
             height: 580,
         };
-        assert_eq!(rects, [column(10), column(505)]);
+        assert_eq!(rects(&strip([1, 2])), [column(10), column(505)]);
     }
 
     #[test]
@@ -343,17 +468,64 @@ mod tests {
     #[test]
     fn width_cycles_through_the_presets_and_wraps() {
         let mut strip = strip([1]);
-        let width = |strip: &Strip<u32>| strip.placements().next().map(|p| p.rect.width);
 
-        assert_eq!(width(&strip), Some(485));
+        assert_eq!(widths(&strip), [485]);
         strip.cycle_width();
-        assert_eq!(width(&strip), Some(650));
+        assert_eq!(widths(&strip), [650]);
         strip.cycle_width();
-        assert_eq!(width(&strip), Some(320));
+        assert_eq!(widths(&strip), [320]);
         assert_eq!(
             320 * 3 + 10 * 4,
             VIEWPORT.width,
             "three thirds fill the viewport"
         );
+    }
+
+    #[test]
+    fn a_full_column_returns_to_the_width_it_had() {
+        let mut strip = strip([1]);
+        strip.resize(10);
+
+        strip.toggle_full();
+        assert_eq!(widths(&strip), [980]);
+        strip.toggle_full();
+        assert_eq!(widths(&strip), [585]);
+
+        strip.toggle_full();
+        strip.resize(-10);
+        assert_eq!(widths(&strip), [880], "resizing starts from the full width");
+    }
+
+    #[test]
+    fn mode_keys_switch_a_mode_on_and_back_off() {
+        use Mode::{Floating, OnTop, Sticky, Tiled};
+
+        assert_eq!(Tiled.toggled(Floating), Floating);
+        assert_eq!(Floating.toggled(Floating), Tiled);
+        assert_eq!(OnTop.toggled(Floating), Tiled, "the floating key tiles");
+
+        assert_eq!(Tiled.toggled(OnTop), OnTop, "floats it on the way");
+        assert_eq!(OnTop.toggled(OnTop), Floating);
+        assert_eq!(
+            OnTop.toggled(Sticky),
+            Sticky,
+            "stays pinned, no longer on top"
+        );
+    }
+
+    #[test]
+    fn resizing_steps_by_a_share_of_the_viewport_within_limits() {
+        let mut strip = strip([1]);
+
+        strip.resize(10);
+        assert_eq!(widths(&strip), [585]);
+        strip.cycle_width();
+        assert_eq!(widths(&strip), [650], "presets pick up from any width");
+
+        while strip.resize(10) {}
+        assert_eq!(widths(&strip), [980], "the viewport less a gap each side");
+
+        while strip.resize(-10) {}
+        assert_eq!(widths(&strip), [100], "a tenth of the viewport");
     }
 }

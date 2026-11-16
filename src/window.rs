@@ -14,18 +14,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput}
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow,
     GetShellWindow, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SW_HIDE,
-    SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPlacement, SetWindowPos,
-    ShowWindowAsync, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_CLOSE,
-    WPF_ASYNCWINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_DLGMODALFRAME,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindowVisible,
+    IsZoomed, PostMessageW, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+    SetWindowPlacement, SetWindowPos, ShowWindowAsync, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WINDOWPLACEMENT, WM_CLOSE, WPF_ASYNCWINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
+    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, PWSTR, Result};
 
 use crate::layout::Rect;
 
-/// A window's position and state before the layout took it over.
+/// A window's position and state at a moment when the layout wasn't placing it.
 pub type Snapshot = WINDOWPLACEMENT;
 
 /// A window, usually owned by another process.
@@ -66,9 +66,9 @@ impl Window {
         let style = |index| unsafe { GetWindowLongW(hwnd, index) }.cast_unsigned();
 
         Info {
-            title: text(|buffer| unsafe { GetWindowTextW(hwnd, buffer) }),
-            class: text(|buffer| unsafe { GetClassNameW(hwnd, buffer) }),
-            bounds: self.frame().unwrap_or_default().into(),
+            title: self.title(),
+            class: self.class(),
+            bounds: self.bounds(),
             visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
             cloaked: self
                 .dwm_attribute::<u32>(DWMWA_CLOAKED)
@@ -78,6 +78,15 @@ impl Window {
             style: WINDOW_STYLE(style(GWL_STYLE)),
             ex_style: WINDOW_EX_STYLE(style(GWL_EXSTYLE)),
         }
+    }
+
+    pub fn title(self) -> String {
+        text(|buffer| unsafe { GetWindowTextW(self.0, buffer) })
+    }
+
+    /// The window class its app registered, the same for every such window.
+    pub fn class(self) -> String {
+        text(|buffer| unsafe { GetClassNameW(self.0, buffer) })
     }
 
     /// Why this window is left out of the layout, or `None` if it's tiled.
@@ -160,6 +169,27 @@ impl Window {
         !maximized
     }
 
+    /// Brings the window above the other ordinary windows without focusing it.
+    pub fn raise(self) {
+        self.reorder(HWND_TOP);
+    }
+
+    /// Keeps the window above every ordinary window, or stops doing so.
+    pub fn set_topmost(self, topmost: bool) {
+        self.reorder(if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        });
+    }
+
+    /// Changes the window's place in the z-order and nothing else about it.
+    fn reorder(self, place: HWND) {
+        let flags = SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
+        // Fails only if the window is gone.
+        let _ = unsafe { SetWindowPos(self.0, Some(place), 0, 0, 0, 0, flags) };
+    }
+
     /// Asks the app to close the window, as its close button would.
     pub fn close(self) {
         // Fails only if the window is already gone.
@@ -209,6 +239,12 @@ impl Window {
         };
         // Fails only if the window is gone.
         let _ = unsafe { SetWindowPlacement(hwnd, &placement) };
+    }
+
+    /// Where the window's visible frame is on screen, or an empty rectangle
+    /// if it can't be measured.
+    pub fn bounds(self) -> Rect {
+        self.frame().unwrap_or_default().into()
     }
 
     /// The visible frame, which excludes the invisible resize border.

@@ -2,6 +2,7 @@ mod cloak;
 mod events;
 mod layout;
 mod manager;
+mod rules;
 mod window;
 
 use std::process::ExitCode;
