@@ -19,6 +19,8 @@ layout model on Windows, in pure Rust calling the Win32 API directly.
 - One desktop thread, one `GetMessage` loop, window events from `SetWinEventHook`
   with `WINEVENT_OUTOFCONTEXT`. No async runtime and no polling. A config worker
   blocks on Windows directory notifications and parses saves off the input thread.
+  Only while something is animating, the loop instead makes one frame per
+  `DwmFlush` and takes input between frames.
 - Layout is a pure function from state to window rectangles, and only the
   differences get applied. This is the part worth unit testing.
 - Window events arrive late, after hotkeys that came in behind them. Check the
@@ -29,11 +31,51 @@ layout model on Windows, in pure Rust calling the Win32 API directly.
   highlight is the layout's focused window, and it redraws after every
   `apply`. Its pictures are DWM thumbnails, never `PrintWindow`, which asks
   the app to draw. Its window's messages are handled in the one loop, not in
-  a window procedure.
+  a window procedure. Its window is only the backdrop; the pictures, and the
+  highlight round the focused one, are on the stage above it.
 - Scrolling moves windows and never resizes them.
 - No animations unless Ike asks for them.
+- Ike asked for configurable animations, to feel like niri's: column
+  scrolls, workspace slides and the overview zoom. They are presentation only.
+  Focus changes at once, and nothing waits for an animation to end.
+  - Windows are never animated themselves: no per-frame `SetWindowPos`, no
+    waiting on an app's repaint. The stage (`stage.rs`), a see-through,
+    click-through surface, moves a DWM thumbnail of each window instead.
+  - Nothing may flash. Pictures first appear exactly over the real windows;
+    one composed frame later the real ones are cloaked and placed where they
+    end up; when the pictures come to rest the real ones are uncloaked beneath
+    them before the pictures go. Two copies in one spot look like one, a frame
+    with neither doesn't. The stage paints nothing of its own, so the
+    wallpaper is never covered.
+  - Windows uncloaks a window that takes the keyboard, by itself and a
+    moment later, and takes the keyboard from one that's cloaked. So the
+    focused window is never cloaked under its picture: it waits uncloaked a
+    screen's height below its place, and takes the keyboard only once it's
+    there. Check `Window::cloaked` as well as our mark, which can outlive
+    the cloak.
+  - Pictures on the desktop are drawn at the window's real size, never scaled.
+    Only the overview scales them.
+  - Motion is critically damped springs (`animation.rs`), stepped exactly, one
+    per edge of each picture. A key pressed mid-move retargets them from where
+    they are, keeping their speed. Never restart a move or queue one.
+  - Frames are paced by `DwmFlush` and advance by whole refreshes, not by a
+    timer, which drifts against the screen and judders.
+  - Width and mode changes apply instantly, with everything at rest.
+  - `[animations]` hot-reloads with the rest of the config.
 - Add crates reluctantly. `windows`/`windows-core` provide Win32; `serde` and
   `toml` parse configuration only at startup and on reload, never on a keypress.
+- `wm-bar` is a separate optional Rust/GDI process in `crates/bar`. The private
+  `crates/bar-protocol` crate publishes a small atomic mapping and coalesces
+  posted notifications with ACKs; no IPC threads or serialization in the WM.
+  Bar commands use the existing actions; hotkeys still call them directly.
+  The bar owns scoped title hooks and its minute clock. `bar.toml` hot-reloads.
+  CPU and physical-memory widgets use native GetSystemTimes/GlobalMemoryStatusEx
+  on the bar thread, with timers only while enabled (2s/5s defaults). The
+  `themes/yasb.toml` profile matches Ike's compact 18px personal YASB styling.
+  Use manual `layout.reserved_top` matching `bar.height`, primary monitor only.
+  Build/test both with `cargo build --workspace` / `cargo test --workspace`.
+  Never launch the visible bar for agent verification; its renderer tests use
+  a private bitmap and the protocol tests use hidden windows only.
 
 ## References
 
@@ -114,9 +156,11 @@ Don't use GlazeWM as a reference; Ike finds it too slow.
 - `cargo run -- list` prints what would be tiled and what is skipped, with the
   reason, without touching anything.
 - `cargo test -- --ignored` cloaks and uncloaks one real window to check the
-  undocumented shell interface still works, which blinks that window, and
-  checks that Windows gives the hidden overview a thumbnail, which shows
-  nothing.
+  undocumented shell interface still works, which blinks that window, checks
+  that Windows gives the hidden stage a thumbnail, which shows nothing, and
+  slides a picture of a test window of its own across the stage for a second,
+  reading the screen back to check that it's exact, see-through and
+  click-through. Run that last one from PowerShell.
 
 Cloaked windows carry a `wm.cloaked` window property, so a run that was killed
 can be cleaned up by starting and quitting the manager again.
