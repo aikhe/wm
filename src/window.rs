@@ -3,23 +3,35 @@ use std::fmt;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWINDOWATTRIBUTE, DwmGetWindowAttribute,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetWindow, GetWindowLongW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, WINDOW_EX_STYLE, WS_EX_APPWINDOW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetWindow,
+    GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, IsZoomed, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE,
+    SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SetForegroundWindow, SetWindowPlacement, SetWindowPos, ShowWindowAsync, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WINDOWPLACEMENT, WPF_ASYNCWINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
+    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, PWSTR, Result};
 
-/// A top-level window, usually owned by another process.
+use crate::layout::Rect;
+
+/// A window's position and state before the layout took it over.
+pub type Placement = WINDOWPLACEMENT;
+
+/// A window, usually owned by another process.
+///
+/// Nothing here waits on the owning app, so a hung app can't stall the manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Window(HWND);
+pub struct Window(pub HWND);
 
 impl Window {
     /// Every visible top-level window, in z-order from the top.
@@ -37,29 +49,52 @@ impl Window {
         Ok(windows)
     }
 
-    /// Reads the window's properties. None of these calls wait on the owning app,
-    /// so this stays fast when that app is hung.
+    /// The window the user is typing into, if any.
+    pub fn foreground() -> Option<Window> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        (!hwnd.is_invalid()).then_some(Window(hwnd))
+    }
+
     pub fn info(self) -> Info {
         let hwnd = self.0;
-        let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };
+        let style = |index| unsafe { GetWindowLongW(hwnd, index) }.cast_unsigned();
 
         Info {
             title: text(|buffer| unsafe { GetWindowTextW(hwnd, buffer) }),
             class: text(|buffer| unsafe { GetClassNameW(hwnd, buffer) }),
-            exe: self.exe(),
-            bounds: self
-                .dwm_attribute(DWMWA_EXTENDED_FRAME_BOUNDS)
-                .unwrap_or_default(),
+            bounds: self.frame().unwrap_or_default().into(),
+            visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
             cloaked: self
                 .dwm_attribute::<u32>(DWMWA_CLOAKED)
                 .is_some_and(|cloaked| cloaked != 0),
             minimized: unsafe { IsIconic(hwnd) }.as_bool(),
             owned: unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|owner| !owner.is_invalid()),
-            ex_style: WINDOW_EX_STYLE(ex_style.cast_unsigned()),
+            style: WINDOW_STYLE(style(GWL_STYLE)),
+            ex_style: WINDOW_EX_STYLE(style(GWL_EXSTYLE)),
         }
     }
 
-    fn exe(self) -> Option<String> {
+    /// Why this window is left out of the layout, or `None` if it's tiled.
+    pub fn skip(self, info: &Info) -> Option<Skip> {
+        // Checked last because, unlike the rest, it sends the window a request.
+        info.skip()
+            .or_else(|| self.refuses_moves().then_some(Skip::Elevated))
+    }
+
+    pub fn is_tileable(self) -> bool {
+        self.skip(&self.info()).is_none()
+    }
+
+    /// Whether Windows blocks us from moving it, as it does for the windows of
+    /// elevated apps when we aren't elevated ourselves.
+    fn refuses_moves(self) -> bool {
+        let nothing = SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER;
+        unsafe { SetWindowPos(self.0, None, 0, 0, 0, 0, nothing) }
+            .is_err_and(|error| error.code() == E_ACCESSDENIED)
+    }
+
+    /// The file name of the owning process, or `None` if it can't be opened.
+    pub fn exe(self) -> Option<String> {
         let mut process_id = 0;
         unsafe { GetWindowThreadProcessId(self.0, Some(&mut process_id)) };
         let process =
@@ -81,6 +116,92 @@ impl Window {
 
         let path = PathBuf::from(OsString::from_wide(&buffer[..len as usize]));
         Some(path.file_name()?.to_string_lossy().into_owned())
+    }
+
+    /// Moves the window so its visible frame fills `rect`.
+    ///
+    /// Returns `false` for a maximized window. It gets restored, but its frame
+    /// can't be measured until the app has done that, so place it again later.
+    pub fn place(self, rect: Rect) -> bool {
+        let hwnd = self.0;
+        let maximized = unsafe { IsZoomed(hwnd) }.as_bool();
+        if maximized {
+            let _ = unsafe { ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE) };
+        }
+
+        // Windows 10 windows carry an invisible resize border outside the
+        // frame, and SetWindowPos positions that outer edge.
+        let mut outer = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut outer) }.is_err() {
+            return true;
+        }
+        let frame = self.frame().unwrap_or(outer);
+        let (left, top) = (frame.left - outer.left, frame.top - outer.top);
+        let (right, bottom) = (outer.right - frame.right, outer.bottom - frame.bottom);
+
+        // Fails only if the window is gone, and an event will tell us that.
+        let _ = unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                rect.x - left,
+                rect.y - top,
+                rect.width + left + right,
+                rect.height + top + bottom,
+                SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+        };
+        !maximized
+    }
+
+    /// Makes this the foreground window.
+    pub fn focus(self) {
+        // Windows only lets a process take the foreground just after it has
+        // received input, so send ourselves an empty mouse event first.
+        let input = [INPUT {
+            r#type: INPUT_MOUSE,
+            ..Default::default()
+        }];
+        unsafe {
+            SendInput(&input, size_of::<INPUT>() as i32);
+            let _ = SetForegroundWindow(self.0);
+        }
+    }
+
+    pub fn placement(self) -> Option<Placement> {
+        let mut placement = Placement {
+            length: size_of::<Placement>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetWindowPlacement(self.0, &mut placement) }.ok()?;
+        Some(placement)
+    }
+
+    /// Puts the window back where `saved` had it. A window that has since been
+    /// hidden or minimized stays that way and returns there when next shown.
+    pub fn restore(self, saved: Placement) {
+        let hwnd = self.0;
+        let show = if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            SW_HIDE
+        } else if unsafe { IsIconic(hwnd) }.as_bool() {
+            SW_SHOWMINNOACTIVE
+        } else if saved.showCmd == SW_SHOWMAXIMIZED.0 as u32 {
+            SW_SHOWMAXIMIZED
+        } else {
+            SW_SHOWNOACTIVATE
+        };
+        let placement = Placement {
+            showCmd: show.0 as u32,
+            flags: saved.flags | WPF_ASYNCWINDOWPLACEMENT,
+            ..saved
+        };
+        // Fails only if the window is gone.
+        let _ = unsafe { SetWindowPlacement(hwnd, &placement) };
+    }
+
+    /// The visible frame, which excludes the invisible resize border.
+    fn frame(self) -> Option<RECT> {
+        self.dwm_attribute(DWMWA_EXTENDED_FRAME_BOUNDS)
     }
 
     /// `T` must be the type DWM documents for `attribute`.
@@ -106,47 +227,68 @@ fn text(read: impl FnOnce(&mut [u16]) -> i32) -> String {
     String::from_utf16_lossy(&buffer[..len])
 }
 
+impl From<RECT> for Rect {
+    fn from(rect: RECT) -> Self {
+        Rect {
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        }
+    }
+}
+
 /// A window's properties, read once so the tiling decision is a pure function.
 #[derive(Debug, Default)]
 pub struct Info {
     pub title: String,
     pub class: String,
-    /// `None` when the process can't be opened, as with elevated apps.
-    pub exe: Option<String>,
-    /// Visible bounds in physical pixels, excluding the invisible resize border.
-    pub bounds: RECT,
+    /// The visible frame, excluding the invisible resize border.
+    pub bounds: Rect,
+    pub visible: bool,
     pub cloaked: bool,
     pub minimized: bool,
     pub owned: bool,
+    pub style: WINDOW_STYLE,
     pub ex_style: WINDOW_EX_STYLE,
 }
 
-/// Why a visible window is left out of the layout.
+/// Why a window is left out of the layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
+    Hidden,
     Cloaked,
     Minimized,
+    Child,
     NoActivate,
     ToolWindow,
     Owned,
+    Dialog,
+    Uncaptioned,
     Untitled,
+    Elevated,
 }
 
 impl Info {
-    /// The reason this window isn't tiled, or `None` if it is.
+    /// The reason these properties rule the window out, or `None` if they don't.
     ///
-    /// Follows the taskbar's rule: unowned, non-tool windows are apps, and
-    /// `WS_EX_APPWINDOW` forces a window to count as one.
+    /// Starts from the taskbar's rule: unowned, non-tool windows are apps, and
+    /// `WS_EX_APPWINDOW` forces a window to count as one. Requiring a caption
+    /// then drops shell surfaces such as the Start menu and the Alt+Tab switcher.
     pub fn skip(&self) -> Option<Skip> {
         let has = |style| self.ex_style.contains(style);
         let app_window = has(WS_EX_APPWINDOW);
 
         [
+            (!self.visible, Skip::Hidden),
             (self.cloaked, Skip::Cloaked),
             (self.minimized, Skip::Minimized),
+            (self.style.contains(WS_CHILD), Skip::Child),
             (has(WS_EX_NOACTIVATE), Skip::NoActivate),
             (has(WS_EX_TOOLWINDOW) && !app_window, Skip::ToolWindow),
             (self.owned && !app_window, Skip::Owned),
+            (has(WS_EX_DLGMODALFRAME), Skip::Dialog),
+            (!self.style.contains(WS_CAPTION), Skip::Uncaptioned),
             (self.title.is_empty(), Skip::Untitled),
         ]
         .into_iter()
@@ -156,22 +298,16 @@ impl Info {
 
 impl fmt::Display for Info {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let RECT {
-            left,
-            top,
-            right,
-            bottom,
+        let Rect {
+            x,
+            y,
+            width,
+            height,
         } = self.bounds;
         write!(
             f,
-            "{:<22} {:>4}x{:<4} at {:>5},{:<5} {:<28} {}",
-            self.exe.as_deref().unwrap_or("?"),
-            right - left,
-            bottom - top,
-            left,
-            top,
-            self.class,
-            self.title,
+            "{width:>4}x{height:<4} at {x:>5},{y:<5} {:<28} {}",
+            self.class, self.title
         )
     }
 }
@@ -183,6 +319,8 @@ mod tests {
     fn app() -> Info {
         Info {
             title: "Editor".into(),
+            visible: true,
+            style: WS_CAPTION,
             ..Info::default()
         }
     }
@@ -220,5 +358,25 @@ mod tests {
             ..app()
         };
         assert_eq!(forced.skip(), None);
+    }
+
+    #[test]
+    fn child_controls_and_captionless_surfaces_are_skipped() {
+        assert_eq!(
+            Info {
+                style: WS_CAPTION | WS_CHILD,
+                ..app()
+            }
+            .skip(),
+            Some(Skip::Child)
+        );
+        assert_eq!(
+            Info {
+                style: WINDOW_STYLE(0),
+                ..app()
+            }
+            .skip(),
+            Some(Skip::Uncaptioned)
+        );
     }
 }

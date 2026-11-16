@@ -43,8 +43,16 @@ Don't use GlazeWM as a reference; Ike finds it too slow.
 
 ## Running
 
-`cargo run -- --skipped` lists the windows that would be tiled, plus the
-visible ones that are skipped and why.
+- `cargo run` tiles the desktop. Alt+H and Alt+L move focus, Alt+Shift+Q or
+  Ctrl+C quits and restores every window.
+- `cargo run -- list` prints what would be tiled and what is skipped, with the
+  reason, without touching anything.
+
+Stop komorebi and whkd before tiling (`komorebic stop --whkd`): two managers
+fight over the same windows, and whkd swallows the same hotkeys.
+
+Agents must not run the tiling mode unasked. It rearranges Ike's real desktop;
+use `list` and the tests to check work instead.
 
 Run it from PowerShell. The agent Git Bash shell sets `__COMPAT_LAYER` to
 force DPI-unaware, so the binary exits there with "Access is denied".
