@@ -13,6 +13,21 @@ pub enum Direction {
     Right,
 }
 
+/// Where a window goes, and whether any part of it lands inside the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement<W> {
+    pub window: W,
+    pub rect: Rect,
+    pub visible: bool,
+}
+
+/// A column width as a fraction of the viewport: numerator, then denominator.
+type Fraction = (i32, i32);
+
+/// The widths a column cycles through, narrowest first.
+const WIDTHS: [Fraction; 3] = [(1, 3), (1, 2), (2, 3)];
+const DEFAULT_WIDTH: Fraction = (1, 2);
+
 struct Column<W> {
     window: W,
     width: i32,
@@ -46,10 +61,9 @@ impl<W: Copy + PartialEq> Strip<W> {
         self.position(window).is_some()
     }
 
-    /// Adds a half-width column to the right of the focused one and focuses it.
+    /// Adds a column to the right of the focused one and focuses it.
     pub fn insert(&mut self, window: W) {
-        // Two of these plus their gaps fill the viewport exactly.
-        let width = (self.viewport.width - self.gap) / 2 - self.gap;
+        let width = self.width(DEFAULT_WIDTH);
         self.focused = if self.columns.is_empty() {
             0
         } else {
@@ -86,20 +100,45 @@ impl<W: Copy + PartialEq> Strip<W> {
     /// Focuses the neighbouring column and returns its window, or `None` at
     /// the end of the strip.
     pub fn focus_toward(&mut self, direction: Direction) -> Option<W> {
-        let target = match direction {
-            Direction::Left => self.focused.checked_sub(1)?,
-            Direction::Right => self.focused + 1,
-        };
-        let window = self.columns.get(target)?.window;
-        self.focused = target;
+        self.focused = self.neighbour(direction)?;
         self.reveal_focused();
-        Some(window)
+        Some(self.columns[self.focused].window)
     }
 
-    /// Where every window goes on screen. Columns scrolled out of view get
-    /// rectangles beyond the viewport's edges.
-    pub fn placements(&self) -> impl Iterator<Item = (W, Rect)> {
-        let mut left = self.viewport.x + self.gap - self.scroll;
+    /// Swaps the focused column with its neighbour, keeping it focused.
+    /// Returns `false` at the end of the strip.
+    pub fn move_toward(&mut self, direction: Direction) -> bool {
+        let Some(target) = self.neighbour(direction) else {
+            return false;
+        };
+        self.columns.swap(self.focused, target);
+        self.focused = target;
+        self.reveal_focused();
+        true
+    }
+
+    /// Steps the focused column to the next wider preset, wrapping round to
+    /// the narrowest. Returns `false` if the strip is empty.
+    pub fn cycle_width(&mut self) -> bool {
+        let Some(current) = self.columns.get(self.focused).map(|column| column.width) else {
+            return false;
+        };
+        let presets = WIDTHS.map(|fraction| self.width(fraction));
+        let next = presets
+            .into_iter()
+            .find(|width| *width > current)
+            .unwrap_or(presets[0]);
+        self.columns[self.focused].width = next;
+        self.reveal_focused();
+        true
+    }
+
+    /// Where every window goes. Columns scrolled out of view get rectangles
+    /// beyond the viewport's edges.
+    pub fn placements(&self) -> impl Iterator<Item = Placement<W>> {
+        let (start, end) = (self.viewport.x, self.viewport.x + self.viewport.width);
+        let mut left = start + self.gap - self.scroll;
+
         self.columns.iter().map(move |column| {
             let rect = Rect {
                 x: left,
@@ -108,7 +147,12 @@ impl<W: Copy + PartialEq> Strip<W> {
                 height: self.viewport.height - 2 * self.gap,
             };
             left += column.width + self.gap;
-            (column.window, rect)
+            let visible = rect.x < end && rect.x + rect.width > start;
+            Placement {
+                window: column.window,
+                rect,
+                visible,
+            }
         })
     }
 
@@ -116,6 +160,20 @@ impl<W: Copy + PartialEq> Strip<W> {
         self.columns
             .iter()
             .position(|column| column.window == window)
+    }
+
+    fn neighbour(&self, direction: Direction) -> Option<usize> {
+        let index = match direction {
+            Direction::Left => self.focused.checked_sub(1)?,
+            Direction::Right => self.focused + 1,
+        };
+        (index < self.columns.len()).then_some(index)
+    }
+
+    /// Sized so that columns whose fractions add up to one fill the viewport
+    /// exactly, gaps included.
+    fn width(&self, (numerator, denominator): Fraction) -> i32 {
+        (self.viewport.width - self.gap) * numerator / denominator - self.gap
     }
 
     /// Scrolls the least distance that puts the focused column, with a gap on
@@ -153,19 +211,32 @@ mod tests {
     }
 
     fn xs(strip: &Strip<u32>) -> Vec<i32> {
-        strip.placements().map(|(_, rect)| rect.x).collect()
+        strip
+            .placements()
+            .map(|placement| placement.rect.x)
+            .collect()
+    }
+
+    fn order(strip: &Strip<u32>) -> Vec<u32> {
+        strip
+            .placements()
+            .map(|placement| placement.window)
+            .collect()
     }
 
     #[test]
     fn two_columns_fill_the_viewport() {
-        let placements: Vec<_> = strip([1, 2]).placements().collect();
+        let rects: Vec<_> = strip([1, 2])
+            .placements()
+            .map(|placement| placement.rect)
+            .collect();
         let column = |x| Rect {
             x,
             y: 10,
             width: 485,
             height: 580,
         };
-        assert_eq!(placements, [(1, column(10)), (2, column(505))]);
+        assert_eq!(rects, [column(10), column(505)]);
     }
 
     #[test]
@@ -182,6 +253,15 @@ mod tests {
 
         strip.focus_toward(Direction::Left);
         assert_eq!(xs(&strip), [10, 505, 1000]);
+    }
+
+    #[test]
+    fn only_columns_inside_the_viewport_are_visible() {
+        let visible: Vec<_> = strip([1, 2, 3])
+            .placements()
+            .map(|placement| placement.visible)
+            .collect();
+        assert_eq!(visible, [false, true, true]);
     }
 
     #[test]
@@ -203,6 +283,37 @@ mod tests {
             strip.focus_toward(Direction::Left),
             None,
             "3 is the only column left"
+        );
+    }
+
+    #[test]
+    fn moving_a_column_carries_focus_with_it() {
+        let mut strip = strip([1, 2, 3]);
+        assert!(strip.move_toward(Direction::Left));
+        assert_eq!(order(&strip), [1, 3, 2]);
+        assert_eq!(
+            strip.focus_toward(Direction::Right),
+            Some(2),
+            "focus followed 3"
+        );
+
+        assert!(!strip.move_toward(Direction::Right), "2 is already last");
+    }
+
+    #[test]
+    fn width_cycles_through_the_presets_and_wraps() {
+        let mut strip = strip([1]);
+        let width = |strip: &Strip<u32>| strip.placements().next().map(|p| p.rect.width);
+
+        assert_eq!(width(&strip), Some(485));
+        strip.cycle_width();
+        assert_eq!(width(&strip), Some(650));
+        strip.cycle_width();
+        assert_eq!(width(&strip), Some(320));
+        assert_eq!(
+            320 * 3 + 10 * 4,
+            VIEWPORT.width,
+            "three thirds fill the viewport"
         );
     }
 }

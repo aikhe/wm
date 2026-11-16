@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -13,9 +14,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, Result};
 
+use crate::cloak::{self, Cloaker};
 use crate::events::{self, Event};
-use crate::layout::{Direction, Rect, Strip};
-use crate::window::{Placement, Window};
+use crate::layout::{Direction, Placement, Rect, Strip};
+use crate::window::{Snapshot, Window};
 
 /// Space between columns and around the edge of the screen, in pixels.
 const GAP: i32 = 8;
@@ -23,18 +25,21 @@ const GAP: i32 = 8;
 #[derive(Clone, Copy)]
 enum Action {
     Focus(Direction),
+    Move(Direction),
+    CycleWidth,
     Quit,
 }
 
+const ALT_SHIFT: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_SHIFT.0);
+
 /// Hotkeys as modifiers, key and action. A binding's index is its hotkey id.
-const BINDINGS: [(HOT_KEY_MODIFIERS, char, Action); 3] = [
+const BINDINGS: [(HOT_KEY_MODIFIERS, char, Action); 6] = [
     (MOD_ALT, 'H', Action::Focus(Direction::Left)),
     (MOD_ALT, 'L', Action::Focus(Direction::Right)),
-    (
-        HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_SHIFT.0),
-        'Q',
-        Action::Quit,
-    ),
+    (ALT_SHIFT, 'H', Action::Move(Direction::Left)),
+    (ALT_SHIFT, 'L', Action::Move(Direction::Right)),
+    (MOD_ALT, 'R', Action::CycleWidth),
+    (ALT_SHIFT, 'Q', Action::Quit),
 ];
 
 /// The thread running the message loop, so Ctrl+C can ask it to stop.
@@ -52,16 +57,19 @@ pub fn run() -> Result<()> {
     events::listen();
 
     let mut manager = Manager::new()?;
-    println!("Tiling. Alt+H and Alt+L move focus, Alt+Shift+Q quits and restores your windows.");
+    println!(
+        "Tiling. Alt+H/L focus, Alt+Shift+H/L move, Alt+R width, Alt+Shift+Q quit and restore."
+    );
 
     let mut message = MSG::default();
     while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
         match message.message {
-            WM_HOTKEY => match BINDINGS.get(message.wParam.0) {
-                Some((_, _, Action::Focus(direction))) => manager.focus_toward(*direction),
-                Some((_, _, Action::Quit)) => break,
-                None => {}
-            },
+            WM_HOTKEY => {
+                let binding = BINDINGS.get(message.wParam.0);
+                if binding.is_some_and(|(_, _, action)| manager.perform(*action).is_break()) {
+                    break;
+                }
+            }
             events::MESSAGE => {
                 if let Some(event) = Event::from_message(&message) {
                     manager.handle(event);
@@ -86,10 +94,11 @@ unsafe extern "system" fn stop_loop(_control: u32) -> BOOL {
 
 struct Manager {
     strip: Strip<Window>,
+    cloaker: Cloaker,
     /// Where each window was last sent, so unchanged ones aren't moved again.
     placed: Vec<(Window, Rect)>,
     /// Where each window was before we first moved it, kept until it's destroyed.
-    originals: Vec<(Window, Placement)>,
+    originals: Vec<(Window, Snapshot)>,
 }
 
 impl Manager {
@@ -97,9 +106,13 @@ impl Manager {
     fn new() -> Result<Self> {
         let mut manager = Manager {
             strip: Strip::new(work_area()?, GAP),
+            cloaker: Cloaker::new()?,
             placed: Vec::new(),
             originals: Vec::new(),
         };
+        // A run that was killed leaves its off-screen windows cloaked, and
+        // cloaked windows aren't adopted.
+        manager.cloaker.uncloak_all();
 
         let mut open: Vec<_> = Window::visible()?
             .into_iter()
@@ -117,6 +130,30 @@ impl Manager {
         Ok(manager)
     }
 
+    /// Carries out a hotkey. Breaks when the manager should exit.
+    fn perform(&mut self, action: Action) -> ControlFlow<()> {
+        match action {
+            Action::Focus(direction) => {
+                if let Some(window) = self.strip.focus_toward(direction) {
+                    self.apply();
+                    window.focus();
+                }
+            }
+            Action::Move(direction) => {
+                if self.strip.move_toward(direction) {
+                    self.apply();
+                }
+            }
+            Action::CycleWidth => {
+                if self.strip.cycle_width() {
+                    self.apply();
+                }
+            }
+            Action::Quit => return ControlFlow::Break(()),
+        }
+        ControlFlow::Continue(())
+    }
+
     fn handle(&mut self, event: Event) {
         let changed = match event {
             Event::Appeared(window) => {
@@ -126,7 +163,9 @@ impl Manager {
                 }
                 new
             }
-            Event::Vanished(window) => self.strip.remove(window),
+            Event::Vanished(window) => self.release(window),
+            // Our own cloaking of an off-screen column lands here too.
+            Event::Cloaked(window) => !cloak::is_cloaked(window) && self.release(window),
             Event::Destroyed(window) => {
                 self.originals.retain(|(known, _)| *known != window);
                 self.strip.remove(window)
@@ -144,36 +183,50 @@ impl Manager {
         }
     }
 
-    fn focus_toward(&mut self, direction: Direction) {
-        if let Some(window) = self.strip.focus_toward(direction) {
-            self.apply();
-            window.focus();
-        }
-    }
-
     fn adopt(&mut self, window: Window) {
         let known = self.originals.iter().any(|(known, _)| *known == window);
-        if let (false, Some(placement)) = (known, window.placement()) {
-            self.originals.push((window, placement));
+        if let (false, Some(snapshot)) = (known, window.snapshot()) {
+            self.originals.push((window, snapshot));
         }
         self.strip.insert(window);
     }
 
-    /// Moves the windows whose rectangle changed since the last call.
+    /// Drops a live window from the layout, uncloaking it so it isn't left
+    /// invisible. Returns `false` if it wasn't in the layout.
+    fn release(&mut self, window: Window) -> bool {
+        let removed = self.strip.remove(window);
+        if removed && cloak::is_cloaked(window) {
+            self.cloaker.set(window, false);
+        }
+        removed
+    }
+
+    /// Moves the windows whose rectangle changed since the last call, and
+    /// cloaks the ones that are entirely off screen.
     fn apply(&mut self) {
         let placed = std::mem::take(&mut self.placed);
-        self.placed = self
-            .strip
-            .placements()
-            .filter(|placement| placed.contains(placement) || placement.0.place(placement.1))
-            .collect();
+
+        for Placement {
+            window,
+            rect,
+            visible,
+        } in self.strip.placements()
+        {
+            if visible == cloak::is_cloaked(window) {
+                self.cloaker.set(window, !visible);
+            }
+            if placed.contains(&(window, rect)) || window.place(rect) {
+                self.placed.push((window, rect));
+            }
+        }
     }
 }
 
 impl Drop for Manager {
     fn drop(&mut self) {
-        for (window, placement) in &self.originals {
-            window.restore(*placement);
+        self.cloaker.uncloak_all();
+        for (window, snapshot) in &self.originals {
+            window.restore(*snapshot);
         }
     }
 }

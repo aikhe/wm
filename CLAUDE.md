@@ -43,10 +43,16 @@ Don't use GlazeWM as a reference; Ike finds it too slow.
 
 ## Running
 
-- `cargo run` tiles the desktop. Alt+H and Alt+L move focus, Alt+Shift+Q or
-  Ctrl+C quits and restores every window.
+- `cargo run` tiles the desktop. Alt+H/L moves focus, Alt+Shift+H/L moves the
+  column, Alt+R cycles its width, Alt+Shift+Q or Ctrl+C quits and restores
+  every window.
 - `cargo run -- list` prints what would be tiled and what is skipped, with the
   reason, without touching anything.
+- `cargo test -- --ignored` cloaks and uncloaks one real window to check the
+  undocumented shell interface still works. It blinks that window.
+
+Cloaked windows carry a `wm.cloaked` window property, so a run that was killed
+can be cleaned up by starting and quitting the manager again.
 
 Stop komorebi and whkd before tiling (`komorebic stop --whkd`): two managers
 fight over the same windows, and whkd swallows the same hotkeys.

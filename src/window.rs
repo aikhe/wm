@@ -25,7 +25,7 @@ use windows::core::{BOOL, PWSTR, Result};
 use crate::layout::Rect;
 
 /// A window's position and state before the layout took it over.
-pub type Placement = WINDOWPLACEMENT;
+pub type Snapshot = WINDOWPLACEMENT;
 
 /// A window, usually owned by another process.
 ///
@@ -168,18 +168,18 @@ impl Window {
         }
     }
 
-    pub fn placement(self) -> Option<Placement> {
-        let mut placement = Placement {
-            length: size_of::<Placement>() as u32,
+    pub fn snapshot(self) -> Option<Snapshot> {
+        let mut snapshot = Snapshot {
+            length: size_of::<Snapshot>() as u32,
             ..Default::default()
         };
-        unsafe { GetWindowPlacement(self.0, &mut placement) }.ok()?;
-        Some(placement)
+        unsafe { GetWindowPlacement(self.0, &mut snapshot) }.ok()?;
+        Some(snapshot)
     }
 
     /// Puts the window back where `saved` had it. A window that has since been
     /// hidden or minimized stays that way and returns there when next shown.
-    pub fn restore(self, saved: Placement) {
+    pub fn restore(self, saved: Snapshot) {
         let hwnd = self.0;
         let show = if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
             SW_HIDE
@@ -190,7 +190,7 @@ impl Window {
         } else {
             SW_SHOWNOACTIVATE
         };
-        let placement = Placement {
+        let placement = Snapshot {
             showCmd: show.0 as u32,
             flags: saved.flags | WPF_ASYNCWINDOWPLACEMENT,
             ..saved

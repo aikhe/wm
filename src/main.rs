@@ -1,3 +1,4 @@
+mod cloak;
 mod events;
 mod layout;
 mod manager;
