@@ -1,0 +1,132 @@
+# wm configuration — all settings below show the built-in defaults.
+# Created at %APPDATA%\wm\config.toml on first start, or by `wm config init`.
+# Save this file to reload. Invalid edits keep the last working configuration.
+# Missing settings use these defaults; unknown settings are errors (catches typos).
+# Pixels are physical screen pixels. No restart or rebuild is needed.
+# Use `wm config check` to validate without rearranging the desktop.
+
+[layout]
+# Gap between columns AND around the outside of the tiled area, in pixels.
+gap = 8
+# Widths are exact fractions of the viewport, including their share of gaps.
+# Default width affects newly tiled windows without an explicit/remembered width.
+default_width = "1/2"
+# Alt+R cycles these in increasing order, then wraps to the first.
+width_presets = ["1/3", "1/2", "2/3"]
+# Minimum column width and amount added/removed by a resize key, in percent.
+min_width_percent = 10
+resize_step_percent = 10
+# Extra space inside Windows' work area (which already excludes the taskbar).
+# For example, set reserved_top = 18 to leave room for an 18px YASB bar.
+reserved_top = 0
+reserved_bottom = 0
+reserved_left = 0
+reserved_right = 0
+
+[behavior]
+# Wrap at the ends for focus keys and move keys, respectively.
+wrap_focus = true
+wrap_move = true
+# Learn each executable + window class's last mode and column width.
+# Learned values stay in rules.txt and are written on graceful exit only.
+# Turning either off also stops using its learned values; it does not erase them.
+remember_modes = true
+remember_widths = true
+# Raise floating windows above tiled windows when a tiled window takes focus.
+floating_above_tiled = true
+# Print window events and hotkey actions to the console. Errors always print.
+log_events = true
+
+[overview]
+# Standard #RRGGBB colors.
+background = "#000000"
+workspace = "#202020"
+active_workspace = "#404040"
+card = "#606060"
+highlight = "#FFFFFF"
+# Focused card's border thickness in pixels (0 disables it).
+highlight_width = 3
+# Vertical screen margin, row gap, and maximum row height, as fractions.
+# These scale with the screen. Rows shrink further when there are many workspaces.
+margin = "1/20"
+row_gap = "1/40"
+max_row_height = "1/3"
+# Inside overview, also accept configured hotkeys with Alt removed (except quit).
+bare_hotkeys = true
+# Arrow keys directly focus; Shift+arrows move. Ctrl+arrows do nothing.
+arrow_keys = true
+# Enter and Escape close the overview on the highlighted window.
+enter_escape_close = true
+
+[hotkeys]
+# Bindings call actions directly in this process. No shell commands are spawned.
+# Omitted actions retain these defaults. Set an action to "" to disable it,
+# except quit, which must remain bound. Duplicate key combinations are errors.
+# Modifiers: Alt, Ctrl, Shift, Win. Keys: A-Z, 0-9, F1-F24, arrows, Space,
+# Tab, Enter, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown,
+# Minus, Equals, Comma, Period, Semicolon, Slash, Backslash, LeftBracket,
+# RightBracket, Quote, Backtick. Case and modifier order do not matter.
+focus_left = "Alt+H"
+focus_right = "Alt+L"
+focus_up = "Alt+K"
+focus_down = "Alt+J"
+move_left = "Alt+Shift+H"
+move_right = "Alt+Shift+L"
+move_up = "Alt+Shift+K"
+move_down = "Alt+Shift+J"
+# Workspaces are numbered from the top; past the last one selects the empty one.
+workspace_1 = "Alt+1"
+workspace_2 = "Alt+2"
+workspace_3 = "Alt+3"
+workspace_4 = "Alt+4"
+workspace_5 = "Alt+5"
+workspace_6 = "Alt+6"
+workspace_7 = "Alt+7"
+workspace_8 = "Alt+8"
+workspace_9 = "Alt+9"
+# Send the focused tiled/floating window to that workspace and follow it.
+send_1 = "Alt+Shift+1"
+send_2 = "Alt+Shift+2"
+send_3 = "Alt+Shift+3"
+send_4 = "Alt+Shift+4"
+send_5 = "Alt+Shift+5"
+send_6 = "Alt+Shift+6"
+send_7 = "Alt+Shift+7"
+send_8 = "Alt+Shift+8"
+send_9 = "Alt+Shift+9"
+cycle_width = "Alt+R"
+resize_narrower = "Alt+Minus"
+resize_wider = "Alt+Equals"
+toggle_full = "Alt+F"
+toggle_float = "Alt+T"
+toggle_sticky = "Alt+Shift+T"
+toggle_top = "Ctrl+Alt+Shift+T"
+overview = "Alt+O"
+close = "Alt+Shift+W"
+quit = "Alt+Shift+E"
+# Optional manual reload; automatic reload always stays enabled.
+reload = "Alt+Shift+R"
+
+# Explicit app rules: none by default. Uncomment a [[window_rules]] block to add one.
+# Rules apply when a window joins (startup, open, or restore), so saving a rule
+# does not unexpectedly move existing windows or replace their current modes.
+# First matching rule wins. All supplied match conditions must match.
+# exe: exact filename, case insensitive; class: exact; title_contains: substring.
+# At least one match condition and one setting are required. Omitted settings
+# fall back to remembered values (if enabled), then the layout defaults.
+# mode: "tiled", "float", "sticky", "top", or "ignore" (leave the window alone).
+# width: column width in pixels, clamped to layout limits. full_width: bool.
+# Explicit rules are never rewritten by wm. Keyboard changes still work for the
+# current window; the explicit rule takes priority the next time one joins.
+#
+# [[window_rules]]
+# exe = "scrcpy.exe"
+# class = "SDL_app"
+# mode = "float"
+# width = 640
+# full_width = false
+#
+# [[window_rules]]
+# exe = "example.exe"
+# title_contains = "Settings"
+# mode = "ignore"

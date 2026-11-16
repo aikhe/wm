@@ -28,38 +28,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{Error, PCWSTR, Result, w};
 
+use crate::config::OverviewStyle;
 use crate::layout::{Rect, Workspaces};
 use crate::window::Window;
 
 const CLASS: PCWSTR = w!("wm.overview");
-
-#[derive(Clone)]
-struct OverviewStyle {
-    background: COLORREF,
-    workspace: COLORREF,
-    active_workspace: COLORREF,
-    card: COLORREF,
-    highlight: COLORREF,
-    highlight_width: i32,
-    margin: (i32, i32),
-    row_gap: (i32, i32),
-    max_row_height: (i32, i32),
-}
-impl Default for OverviewStyle {
-    fn default() -> Self {
-        Self {
-            background: COLORREF(0),
-            workspace: COLORREF(0x202020),
-            active_workspace: COLORREF(0x404040),
-            card: COLORREF(0x606060),
-            highlight: COLORREF(0xffffff),
-            highlight_width: 3,
-            margin: (1, 20),
-            row_gap: (1, 40),
-            max_row_height: (1, 3),
-        }
-    }
-}
 
 /// Fits every workspace on the screen as a row: a scaled-down copy of the
 /// viewport, centred, with the rows stacked from the top.
@@ -156,8 +129,7 @@ pub struct Overview {
 
 impl Overview {
     /// Creates the view's window, which stays hidden until `open`.
-    pub fn new() -> Result<Self> {
-        let style = OverviewStyle::default();
+    pub fn new(style: OverviewStyle) -> Result<Self> {
         let screen = Rect {
             x: 0,
             y: 0,
@@ -205,6 +177,10 @@ impl Overview {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub fn configure(&mut self, style: OverviewStyle) {
+        self.style = style;
     }
 
     /// Whether the message was meant for the view's window.
@@ -398,7 +374,12 @@ mod tests {
             width: 1200,
             height: 900,
         };
-        let map = Map::new(screen, screen, 2, &OverviewStyle::default());
+        let map = Map::new(
+            screen,
+            screen,
+            2,
+            &crate::config::Config::parse("").unwrap().style,
+        );
         let row = |y| Rect {
             x: 400,
             y,
@@ -432,7 +413,8 @@ mod tests {
     #[test]
     #[ignore]
     fn windows_gives_the_view_a_picture_of_another_apps_window() {
-        let overview = Overview::new().expect("the view's window is created");
+        let overview = Overview::new(crate::config::Config::parse("").unwrap().style)
+            .expect("the view's window is created");
         let open = Window::visible().expect("windows can be listed");
         let window = open
             .into_iter()

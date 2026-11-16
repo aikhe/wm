@@ -1,157 +1,80 @@
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{LPARAM, RECT, WPARAM};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, VIRTUAL_KEY,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetMessageW, MSG, PostThreadMessageW, SPI_GETWORKAREA, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_PAINT, WM_QUIT,
+    GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SPI_GETWORKAREA,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW, WM_HOTKEY,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_PAINT, WM_QUIT,
 };
 use windows::core::{BOOL, Result};
 
+use crate::bindings::{Action, Binding, Hotkeys};
 use crate::cloak::{self, Cloaker};
+use crate::config::{self, Config};
+use crate::config_watch::{self, Watcher};
 use crate::events::{self, Event};
 use crate::layout::{Direction, Mode, Placement, Rect, Width, Workspaces};
 use crate::overview::{Overview, Target};
 use crate::rules::{Rule, Rules};
 use crate::window::{Snapshot, Window};
 
-/// Space between columns and around the viewport, in pixels.
-const GAP: i32 = 8;
-const RESIZE_STEP: i32 = 10;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
-    Focus(Direction),
-    Move(Direction),
-    Workspace(usize),
-    Send(usize),
-    CycleWidth,
-    Resize(i32),
-    ToggleFull,
-    Toggle(Mode),
-    Overview,
-    Close,
-    Quit,
-}
-
-const ALT_SHIFT: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_SHIFT.0);
-const CTRL_ALT_SHIFT: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_CONTROL.0 | ALT_SHIFT.0);
-
-const BINDINGS: [(HOT_KEY_MODIFIERS, VIRTUAL_KEY, Action); 36] = [
-    (
-        MOD_ALT,
-        VIRTUAL_KEY(b'H' as u16),
-        Action::Focus(Direction::Left),
-    ),
-    (
-        MOD_ALT,
-        VIRTUAL_KEY(b'L' as u16),
-        Action::Focus(Direction::Right),
-    ),
-    (
-        MOD_ALT,
-        VIRTUAL_KEY(b'K' as u16),
-        Action::Focus(Direction::Up),
-    ),
-    (
-        MOD_ALT,
-        VIRTUAL_KEY(b'J' as u16),
-        Action::Focus(Direction::Down),
-    ),
-    (
-        ALT_SHIFT,
-        VIRTUAL_KEY(b'H' as u16),
-        Action::Move(Direction::Left),
-    ),
-    (
-        ALT_SHIFT,
-        VIRTUAL_KEY(b'L' as u16),
-        Action::Move(Direction::Right),
-    ),
-    (
-        ALT_SHIFT,
-        VIRTUAL_KEY(b'K' as u16),
-        Action::Move(Direction::Up),
-    ),
-    (
-        ALT_SHIFT,
-        VIRTUAL_KEY(b'J' as u16),
-        Action::Move(Direction::Down),
-    ),
-    (MOD_ALT, VIRTUAL_KEY(b'1' as u16), Action::Workspace(0)),
-    (MOD_ALT, VIRTUAL_KEY(b'2' as u16), Action::Workspace(1)),
-    (MOD_ALT, VIRTUAL_KEY(b'3' as u16), Action::Workspace(2)),
-    (MOD_ALT, VIRTUAL_KEY(b'4' as u16), Action::Workspace(3)),
-    (MOD_ALT, VIRTUAL_KEY(b'5' as u16), Action::Workspace(4)),
-    (MOD_ALT, VIRTUAL_KEY(b'6' as u16), Action::Workspace(5)),
-    (MOD_ALT, VIRTUAL_KEY(b'7' as u16), Action::Workspace(6)),
-    (MOD_ALT, VIRTUAL_KEY(b'8' as u16), Action::Workspace(7)),
-    (MOD_ALT, VIRTUAL_KEY(b'9' as u16), Action::Workspace(8)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'1' as u16), Action::Send(0)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'2' as u16), Action::Send(1)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'3' as u16), Action::Send(2)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'4' as u16), Action::Send(3)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'5' as u16), Action::Send(4)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'6' as u16), Action::Send(5)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'7' as u16), Action::Send(6)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'8' as u16), Action::Send(7)),
-    (ALT_SHIFT, VIRTUAL_KEY(b'9' as u16), Action::Send(8)),
-    (MOD_ALT, VIRTUAL_KEY(b'R' as u16), Action::CycleWidth),
-    (MOD_ALT, VIRTUAL_KEY(0xbd), Action::Resize(-RESIZE_STEP)),
-    (MOD_ALT, VIRTUAL_KEY(0xbb), Action::Resize(RESIZE_STEP)),
-    (MOD_ALT, VIRTUAL_KEY(b'F' as u16), Action::ToggleFull),
-    (
-        MOD_ALT,
-        VIRTUAL_KEY(b'T' as u16),
-        Action::Toggle(Mode::Floating),
-    ),
-    (
-        ALT_SHIFT,
-        VIRTUAL_KEY(b'T' as u16),
-        Action::Toggle(Mode::Sticky),
-    ),
-    (
-        CTRL_ALT_SHIFT,
-        VIRTUAL_KEY(b'T' as u16),
-        Action::Toggle(Mode::OnTop),
-    ),
-    (MOD_ALT, VIRTUAL_KEY(b'O' as u16), Action::Overview),
-    (ALT_SHIFT, VIRTUAL_KEY(b'W' as u16), Action::Close),
-    (ALT_SHIFT, VIRTUAL_KEY(b'E' as u16), Action::Quit),
-];
-
 /// The thread running the message loop, so Ctrl+C can ask it to stop.
 static LOOP_THREAD: AtomicU32 = AtomicU32::new(0);
 
 /// Tiles the desktop until the quit hotkey or Ctrl+C, then puts every window
 /// back where it was.
-pub fn run() -> Result<()> {
-    LOOP_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+pub fn run(path: PathBuf) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    config::init(&path)?;
+    let initial = config::read(&path)?;
+    let config = Config::parse(&initial).map_err(|error| format!("{}: {error}", path.display()))?;
+    let viewport = config.viewport(work_area()?)?;
+    let thread = unsafe { GetCurrentThreadId() };
+    LOOP_THREAD.store(thread, Ordering::Relaxed);
     unsafe { SetConsoleCtrlHandler(Some(stop_loop), true)? };
-    for (id, (modifiers, key, _)) in BINDINGS.into_iter().enumerate() {
-        unsafe { RegisterHotKey(None, id as i32, modifiers, key.0.into())? };
-    }
+    // Make the queue before the file watcher can post its first update.
+    let mut queued = MSG::default();
+    let _ = unsafe { PeekMessageW(&mut queued, None, 0, 0, PM_NOREMOVE) };
+    let mut hotkeys = Hotkeys::default();
+    hotkeys.replace(config.bindings.clone())?;
+    let watcher = Watcher::new(path.clone(), initial, Some(thread))?;
     events::listen();
-    let mut manager = Manager::new()?;
-    println!("Tiling. Alt+H/J/K/L focus; add Shift to move. Alt+1..9 workspace; Shift sends.");
+    println!("Config: {} (reloads on save)", path.display());
     println!(
-        "Alt+T float, Alt+Shift+T sticky, Ctrl+Alt+Shift+T on top. Alt+R/-/= width, Alt+F full."
+        "Tiling. Hotkeys and all defaults are documented in that file. Ctrl+C quits and restores."
     );
-    println!("Alt+O overview, Alt+Shift+W close, Alt+Shift+E quit and restore.");
+    let mut manager = Manager::new(config, viewport)?;
+
     let mut message = MSG::default();
     while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+        if message.message == config_watch::MESSAGE {
+            if let Some(update) = watcher.take() {
+                manager.reload(update, &mut hotkeys);
+            }
+            continue;
+        }
         let in_overview = manager.overview.owns(&message);
         let action = match message.message {
-            WM_HOTKEY => BINDINGS.get(message.wParam.0).map(|(_, _, action)| *action),
-            WM_KEYDOWN if in_overview => overview_action(VIRTUAL_KEY(message.wParam.0 as u16)),
+            WM_HOTKEY => hotkeys.action(message.wParam.0),
+            WM_KEYDOWN if in_overview => {
+                let held = [(0x10, 4), (0x11, 2), (0x12, 1), (0x5b, 8), (0x5c, 8)]
+                    .into_iter()
+                    .filter(|(key, _)| unsafe { GetKeyState(*key) } < 0)
+                    .fold(0, |all, (_, modifier)| all | modifier);
+                overview_action(
+                    message.wParam.0 as u16,
+                    held,
+                    &hotkeys.bindings,
+                    &manager.config.overview,
+                )
+            }
             WM_LBUTTONDOWN if in_overview => {
+                // The low and high words of the parameter, each signed.
                 let point = message.lParam.0;
                 manager.click(i32::from(point as i16), i32::from((point >> 16) as i16));
                 None
@@ -168,35 +91,57 @@ pub fn run() -> Result<()> {
             }
             _ => None,
         };
+        if action == Some(Action::Reload) {
+            watcher.reload();
+            continue;
+        }
         if action.is_some_and(|action| manager.perform(action).is_break()) {
             break;
         }
     }
+
     Ok(())
 }
 
 /// The action for a key pressed in the overview. Every hotkey works there
 /// without Alt, the arrow keys stand in for H/J/K/L, and Enter or Escape
 /// closes it. Quitting still takes the whole hotkey.
-fn overview_action(key: VIRTUAL_KEY) -> Option<Action> {
-    let key = match key.0 {
-        0x25 => VIRTUAL_KEY(b'H' as u16),
-        0x28 => VIRTUAL_KEY(b'J' as u16),
-        0x26 => VIRTUAL_KEY(b'K' as u16),
-        0x27 => VIRTUAL_KEY(b'L' as u16),
-        13 | 27 => VIRTUAL_KEY(b'O' as u16),
-        _ => key,
-    };
-    let held = |key| unsafe { GetKeyState(key) } < 0;
-    let modifiers = [(0x10, MOD_SHIFT), (0x11, MOD_CONTROL)]
-        .into_iter()
-        .filter(|(key, _)| held(*key))
-        .fold(MOD_ALT, |all, (_, modifier)| all | modifier);
-    BINDINGS
-        .into_iter()
-        .find(|(wanted, bound, _)| (*wanted, *bound) == (modifiers, key))
-        .map(|(_, _, action)| action)
-        .filter(|action| !matches!(action, Action::Quit))
+fn overview_action(
+    key: u16,
+    held: u32,
+    bindings: &[Binding],
+    options: &config::Overview,
+) -> Option<Action> {
+    if options.enter_escape_close && held == 0 && matches!(key, 13 | 27) {
+        return Some(Action::Overview);
+    }
+    if options.arrow_keys && matches!(held, 0 | 4) {
+        let direction = match key {
+            0x25 => Some(Direction::Left),
+            0x26 => Some(Direction::Up),
+            0x27 => Some(Direction::Right),
+            0x28 => Some(Direction::Down),
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            return Some(if held == 4 {
+                Action::Move(direction)
+            } else {
+                Action::Focus(direction)
+            });
+        }
+    }
+    if !options.bare_hotkeys {
+        return None;
+    }
+    bindings
+        .iter()
+        .find(|binding| {
+            binding.chord.key == key
+                && binding.chord.modifiers & !1 == held
+                && binding.action != Action::Quit
+        })
+        .map(|binding| binding.action)
 }
 
 /// Runs on a thread Windows creates for Ctrl+C or a closing console.
@@ -210,6 +155,7 @@ unsafe extern "system" fn stop_loop(_control: u32) -> BOOL {
 }
 
 struct Manager {
+    config: Config,
     layout: Workspaces<Window>,
     cloaker: Cloaker,
     /// Where each window was last sent, so unchanged ones aren't moved again.
@@ -225,14 +171,17 @@ struct Manager {
 
 impl Manager {
     /// Adopts the windows already open, left to right as they sit on screen.
-    fn new() -> Result<Self> {
+    fn new(config: Config, viewport: Rect) -> Result<Self> {
+        let mut layout = Workspaces::new(viewport, config.layout.gap);
+        layout.configure(viewport, config.layout.gap, config.options.clone());
         let mut manager = Manager {
-            layout: Workspaces::new(work_area()?, GAP),
+            layout,
             cloaker: Cloaker::new()?,
             placed: Vec::new(),
             untiled: Vec::new(),
             rules: Rules::load(),
-            overview: Overview::new()?,
+            overview: Overview::new(config.style.clone())?,
+            config,
         };
         // A run that was killed leaves its off-screen windows cloaked, and
         // cloaked windows aren't adopted.
@@ -257,6 +206,27 @@ impl Manager {
         Ok(manager)
     }
 
+    fn reload(&mut self, update: std::result::Result<Config, String>, hotkeys: &mut Hotkeys) {
+        let prepared = update.and_then(|config| {
+            let area = work_area().map_err(|error| error.to_string())?;
+            let viewport = config.viewport(area)?;
+            hotkeys.replace(config.bindings.clone())?;
+            Ok((config, viewport))
+        });
+        match prepared {
+            Ok((config, viewport)) => {
+                self.layout
+                    .configure(viewport, config.layout.gap, config.options.clone());
+                self.overview.configure(config.style.clone());
+                self.config = config;
+                self.apply();
+                self.raise_floating();
+                println!("Config reloaded. App rules/default widths apply when windows next join.");
+            }
+            Err(error) => eprintln!("Config reload rejected; previous settings kept: {error}"),
+        }
+    }
+
     /// Carries out a hotkey. Breaks when the manager should exit.
     fn perform(&mut self, action: Action) -> ControlFlow<()> {
         let changed = match action {
@@ -265,7 +235,9 @@ impl Manager {
             Action::Workspace(index) => self.layout.focus_workspace(index),
             Action::Send(index) => self.layout.move_to_workspace(index),
             Action::CycleWidth => self.layout.cycle_width(),
-            Action::Resize(sign) => self.layout.resize(sign),
+            Action::Resize(sign) => self
+                .layout
+                .resize(sign * self.config.layout.resize_step_percent),
             Action::ToggleFull => self.layout.toggle_full(),
             Action::Toggle(mode) => self.toggle(mode),
             Action::Overview => {
@@ -291,6 +263,7 @@ impl Manager {
                 false
             }
             Action::Quit => return ControlFlow::Break(()),
+            Action::Reload => return ControlFlow::Continue(()),
         };
 
         let name = format!("{action:?}");
@@ -304,7 +277,7 @@ impl Manager {
             self.apply();
             self.focus_layout();
             self.log(&name);
-        } else if !matches!(action, Action::Close) {
+        } else if self.config.behavior.log_events && !matches!(action, Action::Close) {
             println!("{name:<17} nothing to do");
         }
         ControlFlow::Continue(())
@@ -375,6 +348,9 @@ impl Manager {
 
     /// Prints what just happened, then the focused window and how it's kept.
     fn log(&self, event: &str) {
+        if !self.config.behavior.log_events {
+            return;
+        }
         let (active, count) = self.layout.active();
         let workspace = active + 1;
         let Some(window) = self.layout.focused() else {
@@ -400,6 +376,9 @@ impl Manager {
 
     /// Makes the focused column's width the one new windows of its kind open at.
     fn record_width(&mut self) {
+        if !self.config.behavior.remember_widths {
+            return;
+        }
         let Some(window) = self.layout.focused() else {
             return;
         };
@@ -447,6 +426,9 @@ impl Manager {
     /// Puts the floating windows on screen back above the tiled ones. A tiled
     /// window comes to the top when it takes focus, which would bury them.
     fn raise_floating(&self) {
+        if !self.config.behavior.floating_above_tiled {
+            return;
+        }
         self.layout
             .placements()
             .filter(|placement| placement.rect.is_none() && placement.visible)
@@ -468,7 +450,13 @@ impl Manager {
         let after = before.toggled(target);
         // Its own width while it's tiled, or else the one its kind last had.
         let width = self.layout.width(window);
-        let width = width.or(self.rules.get(window).width);
+        let width = width.or_else(|| {
+            self.config
+                .behavior
+                .remember_widths
+                .then(|| self.rules.get(window).width)
+                .flatten()
+        });
         self.layout.set_mode(window, after, width);
 
         let spot = self.untiled.iter().find(|(known, _)| *known == window);
@@ -484,14 +472,37 @@ impl Manager {
         if (before == Mode::OnTop) != (after == Mode::OnTop) {
             window.set_topmost(after == Mode::OnTop);
         }
-        self.rules.set(window, Rule { mode: after, width });
+        let previous = self.rules.get(window);
+        self.rules.set(
+            window,
+            Rule {
+                mode: if self.config.behavior.remember_modes {
+                    after
+                } else {
+                    previous.mode
+                },
+                width: if self.config.behavior.remember_widths {
+                    width
+                } else {
+                    previous.width
+                },
+            },
+        );
         true
     }
 
     /// Takes the window into the layout, in the mode and at the width its
     /// kind was last given.
     fn adopt(&mut self, window: Window) -> bool {
-        let Rule { mode, width } = self.rules.get(window);
+        let Some(Rule { mode, width }) = self.config.resolve_rule(
+            &window.exe().unwrap_or_default(),
+            &window.class(),
+            &window.title(),
+            self.rules.get(window),
+            self.layout.default_width(),
+        ) else {
+            return false;
+        };
         if !self.untiled.iter().any(|(known, _)| *known == window) {
             self.remember(window);
         }
@@ -574,4 +585,29 @@ pub fn work_area() -> Result<Rect> {
         )?;
     }
     Ok(area.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overview_uses_rebound_keys_and_keeps_navigation_and_exit_available() {
+        let config = Config::parse("[hotkeys]\nfocus_left='Alt+U'\noverview='Alt+P'").unwrap();
+        let action = |key, held| overview_action(key, held, &config.bindings, &config.overview);
+        assert_eq!(
+            action(u16::from(b'U'), 0),
+            Some(Action::Focus(Direction::Left))
+        );
+        assert_eq!(action(u16::from(b'H'), 0), None);
+        assert_eq!(action(u16::from(b'P'), 0), Some(Action::Overview));
+        assert_eq!(action(0x25, 4), Some(Action::Move(Direction::Left)));
+        assert_eq!(action(13, 0), Some(Action::Overview));
+        assert_eq!(action(27, 0), Some(Action::Overview));
+        assert_eq!(
+            action(u16::from(b'E'), 4),
+            None,
+            "quit needs the full shortcut"
+        );
+    }
 }

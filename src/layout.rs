@@ -86,7 +86,13 @@ enum Step {
 impl Step {
     /// The index one step away from `index` among `count` items, wrapping
     /// round at the ends. `None` when there is nowhere else to go.
-    fn from(self, index: usize, count: usize) -> Option<usize> {
+    fn from(self, index: usize, count: usize, wrap: bool) -> Option<usize> {
+        if !wrap {
+            return match self {
+                Step::Back => index.checked_sub(1),
+                Step::Forward => (index + 1 < count).then_some(index + 1),
+            };
+        }
         let step = match self {
             Step::Back => count.checked_sub(1)?,
             Step::Forward => 1,
@@ -96,11 +102,29 @@ impl Step {
 }
 
 /// A column width as a fraction of the viewport: numerator, then denominator.
-type Fraction = (i32, i32);
+pub type Fraction = (i32, i32);
 
 /// The widths a column cycles through, narrowest first.
-const WIDTHS: [Fraction; 3] = [(1, 3), (1, 2), (2, 3)];
-const DEFAULT_WIDTH: Fraction = (1, 2);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Options {
+    pub widths: Vec<Fraction>,
+    pub default_width: Fraction,
+    pub min_width_percent: i32,
+    pub wrap_focus: bool,
+    pub wrap_move: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            widths: vec![(1, 3), (1, 2), (2, 3)],
+            default_width: (1, 2),
+            min_width_percent: 10,
+            wrap_focus: true,
+            wrap_move: true,
+        }
+    }
+}
 
 /// How wide a column is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +146,7 @@ struct Column<W> {
 struct Strip<W> {
     viewport: Rect,
     gap: i32,
+    options: Options,
     columns: Vec<Column<W>>,
     focused: usize,
     /// How far the row has scrolled left under the viewport.
@@ -133,6 +158,7 @@ impl<W: Copy + PartialEq> Strip<W> {
         Strip {
             viewport,
             gap,
+            options: Options::default(),
             columns: Vec::new(),
             focused: 0,
             scroll: 0,
@@ -167,7 +193,9 @@ impl<W: Copy + PartialEq> Strip<W> {
                 ..width
             },
             None => Width {
-                pixels: self.preset(DEFAULT_WIDTH).clamp(narrowest, widest),
+                pixels: self
+                    .preset(self.options.default_width)
+                    .clamp(narrowest, widest),
                 full: false,
             },
         };
@@ -209,7 +237,8 @@ impl<W: Copy + PartialEq> Strip<W> {
     /// Focuses the neighbouring column, wrapping round at the ends. Returns
     /// `false` when there is no other column.
     fn focus_toward(&mut self, step: Step) -> bool {
-        let Some(target) = step.from(self.focused, self.columns.len()) else {
+        let Some(target) = step.from(self.focused, self.columns.len(), self.options.wrap_focus)
+        else {
             return false;
         };
         self.focused = target;
@@ -221,7 +250,8 @@ impl<W: Copy + PartialEq> Strip<W> {
     /// end it wraps round to the other one. Returns `false` when there is no
     /// other column.
     fn move_toward(&mut self, step: Step) -> bool {
-        let Some(target) = step.from(self.focused, self.columns.len()) else {
+        let Some(target) = step.from(self.focused, self.columns.len(), self.options.wrap_move)
+        else {
             return false;
         };
         let column = self.columns.remove(self.focused);
@@ -234,9 +264,20 @@ impl<W: Copy + PartialEq> Strip<W> {
     /// Steps the focused column to the next wider preset, wrapping round to
     /// the narrowest. Returns `false` if the strip is empty.
     fn cycle_width(&mut self) -> bool {
-        let presets = WIDTHS.map(|fraction| self.preset(fraction));
-        let wider = |pixels| presets.into_iter().find(|preset| *preset > pixels);
-        self.rewidth(|pixels| wider(pixels).unwrap_or(presets[0]))
+        let (min, max) = self.limits();
+        let presets: Vec<_> = self
+            .options
+            .widths
+            .iter()
+            .map(|fraction| self.preset(*fraction).clamp(min, max))
+            .collect();
+        self.rewidth(|pixels| {
+            presets
+                .iter()
+                .copied()
+                .find(|preset| *preset > pixels)
+                .unwrap_or(presets[0])
+        })
     }
 
     /// Widens the focused column by a percentage of the viewport, or narrows
@@ -313,9 +354,20 @@ impl<W: Copy + PartialEq> Strip<W> {
     /// all of it with a gap each side.
     fn limits(&self) -> (i32, i32) {
         (
-            (self.viewport.width * 10 / 100).max(1),
+            (self.viewport.width * self.options.min_width_percent / 100).max(1),
             self.viewport.width - 2 * self.gap,
         )
+    }
+
+    fn configure(&mut self, viewport: Rect, gap: i32, options: Options) {
+        self.viewport = viewport;
+        self.gap = gap;
+        self.options = options;
+        let (min, max) = self.limits();
+        for column in &mut self.columns {
+            column.width.pixels = column.width.pixels.clamp(min, max);
+        }
+        self.reveal_focused();
     }
 
     /// How wide the column is drawn.

@@ -1,4 +1,4 @@
-use super::{Direction, Mode, Placement, Rect, Step, Strip, Width};
+use super::{Direction, Mode, Options, Placement, Rect, Step, Strip, Width};
 
 /// A strip of tiled columns and the floating windows that sit above it.
 struct Workspace<W> {
@@ -39,6 +39,7 @@ enum Home {
 pub struct Workspaces<W> {
     viewport: Rect,
     gap: i32,
+    options: Options,
     stack: Vec<Workspace<W>>,
     /// The workspace on screen.
     active: usize,
@@ -56,6 +57,7 @@ impl<W: Copy + PartialEq> Workspaces<W> {
         Workspaces {
             viewport,
             gap,
+            options: Options::default(),
             stack: vec![Workspace::new(viewport, gap)],
             active: 0,
             sticky: Vec::new(),
@@ -95,6 +97,25 @@ impl<W: Copy + PartialEq> Workspaces<W> {
     /// The part of the screen that tiled windows fill.
     pub fn viewport(&self) -> Rect {
         self.viewport
+    }
+
+    /// Update settings in place, preserving workspaces, windows, focus and widths.
+    /// Widths are clamped only when the new viewport/limits require it.
+    pub fn configure(&mut self, viewport: Rect, gap: i32, options: Options) {
+        self.viewport = viewport;
+        self.gap = gap;
+        self.options = options;
+        for workspace in &mut self.stack {
+            workspace
+                .strip
+                .configure(viewport, gap, self.options.clone());
+        }
+    }
+
+    pub fn default_width(&self) -> i32 {
+        let strip = &self.stack[self.active].strip;
+        let (min, max) = strip.limits();
+        strip.preset(self.options.default_width).clamp(min, max)
     }
 
     /// The focused window: a floating one, or else the focused column of the
@@ -179,7 +200,7 @@ impl<W: Copy + PartialEq> Workspaces<W> {
     pub fn move_toward(&mut self, direction: Direction) -> bool {
         let shift =
             |strip: Option<&mut Strip<W>>, step| strip.is_some_and(|strip| strip.move_toward(step));
-        let next = |step: Step| step.from(self.active, self.stack.len());
+        let next = |step: Step| step.from(self.active, self.stack.len(), self.options.wrap_move);
         match direction {
             Direction::Left => shift(self.focused_strip(), Step::Back),
             Direction::Right => shift(self.focused_strip(), Step::Forward),
@@ -304,7 +325,7 @@ impl<W: Copy + PartialEq> Workspaces<W> {
     }
 
     fn switch(&mut self, step: Step) -> bool {
-        step.from(self.active, self.stack.len())
+        step.from(self.active, self.stack.len(), self.options.wrap_focus)
             .is_some_and(|target| self.show(target))
     }
 
@@ -366,7 +387,9 @@ impl<W: Copy + PartialEq> Workspaces<W> {
         self.active -= dropped_above;
 
         if self.stack.last().is_none_or(|last| !last.is_empty()) {
-            self.stack.push(Workspace::new(self.viewport, self.gap));
+            let mut workspace = Workspace::new(self.viewport, self.gap);
+            workspace.strip.options = self.options.clone();
+            self.stack.push(workspace);
         }
     }
 }
@@ -405,6 +428,75 @@ mod tests {
             .filter(|p| p.visible)
             .map(|p| p.window)
             .collect()
+    }
+
+    #[test]
+    fn reloading_layout_preserves_workspaces_focus_and_widths_and_updates_future_strips() {
+        let mut workspaces = workspaces([1, 2]);
+        workspaces.move_toward(Direction::Down);
+        let before_width = workspaces.width(2).unwrap();
+        let before_rows = rows(&workspaces);
+        let options = Options {
+            widths: vec![(1, 4), (3, 4)],
+            default_width: (3, 4),
+            wrap_focus: false,
+            wrap_move: false,
+            ..Options::default()
+        };
+        let viewport = Rect {
+            y: 20,
+            height: 580,
+            ..VIEWPORT
+        };
+        workspaces.configure(viewport, 12, options);
+        assert_eq!(workspaces.active(), (1, 3));
+        assert_eq!(workspaces.focused(), Some(2));
+        assert_eq!(workspaces.width(2), Some(before_width));
+        assert_eq!(rows(&workspaces), before_rows);
+        let placed = workspaces
+            .placements()
+            .find(|p| p.window == 2)
+            .unwrap()
+            .rect
+            .unwrap();
+        assert_eq!((placed.y, placed.height), (32, 556));
+        // The existing empty workspace and a newly created one inherit defaults.
+        workspaces.focus_workspace(2);
+        workspaces.insert(3, Mode::Tiled, None);
+        assert_eq!(
+            workspaces.width(3).unwrap().pixels,
+            (1000 - 12) * 3 / 4 - 12
+        );
+        assert!(!workspaces.focus_toward(Direction::Right));
+        assert!(!workspaces.move_toward(Direction::Left));
+        workspaces.focus_workspace(3);
+        assert!(!workspaces.focus_toward(Direction::Down));
+        workspaces.insert(4, Mode::Tiled, None);
+        assert_eq!(workspaces.width(4), workspaces.width(3));
+        workspaces.cycle_width();
+        assert_eq!(workspaces.width(4).unwrap().pixels, (1000 - 12) / 4 - 12);
+    }
+
+    #[test]
+    fn shrinking_viewport_clamps_widths_without_changing_the_full_toggle() {
+        let mut workspaces = workspaces([1, 2]);
+        workspaces.toggle_full();
+        workspaces.configure(
+            Rect {
+                width: 300,
+                ..VIEWPORT
+            },
+            10,
+            Options::default(),
+        );
+        assert_eq!(workspaces.width(1).unwrap().pixels, 280);
+        assert_eq!(
+            workspaces.width(2),
+            Some(Width {
+                pixels: 280,
+                full: true
+            })
+        );
     }
 
     #[test]
