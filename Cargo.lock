@@ -278,4 +278,22 @@ dependencies = [
  "toml",
  "windows",
  "windows-core",
+ "wm-bar-protocol",
+]
+
+[[package]]
+name = "wm-bar"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+ "windows",
+ "wm-bar-protocol",
+]
+
+[[package]]
+name = "wm-bar-protocol"
+version = "0.1.0"
+dependencies = [
+ "windows",
 ]

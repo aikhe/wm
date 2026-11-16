@@ -1,0 +1,66 @@
+# wm-bar: a separate native Rust bar for wm. Save to reload.
+# Pixels are physical, matching wm's layout.reserved_top. Unknown keys are errors.
+# In wm's config.toml, set [layout] reserved_top = 28 (or your chosen height).
+# This bar does not register an AppBar or change the Windows work area.
+
+[bar]
+height = 28
+padding = 8
+gap = 8
+# Width of each workspace button. Long lists show a page around the active one.
+workspace_width = 30
+max_workspaces = 12
+# Horizontal padding inside each text widget, and gap between an icon and label.
+widget_padding = 6
+icon_gap = 4
+# Vertical inset of workspace backgrounds. Zero fills the bar's height.
+workspace_inset = 2
+# Cap long titles so side widgets cannot consume the whole bar.
+title_max_width = 320
+
+[modules]
+# Available: "workspaces", "mode", "title", "clock", "cpu", "memory".
+# [] hides a group. Removing cpu/memory stops their sampling timers.
+# A module may occur only once across the three groups.
+# Click a workspace to switch; scroll it to move up/down through workspaces.
+# Click the title or mode to toggle overview. Right-click anywhere to exit.
+left = ["workspaces", "mode"]
+center = ["title"]
+right = ["cpu", "memory", "clock"]
+
+[theme]
+# Installed family name, as printed by `wm-bar fonts`. Omit or leave blank for
+# Segoe UI. Missing families fall back to Segoe UI with a console diagnostic.
+font = "Segoe UI"
+# Physical pixel height; 400 = regular, 600 = semibold, 700 = bold.
+font_size = 11
+font_weight = 400
+icon_font = "Segoe MDL2 Assets"
+icon_size = 13
+workspace_font_size = 11
+background = "#111318"
+foreground = "#DCE0E8"
+muted = "#818898"
+accent = "#89B4FA"
+active_foreground = "#111318"
+# Optional: active_background = "#3D3C3D". Defaults to accent when omitted.
+
+[clock]
+# {hour}, {minute}, {day}, {month}, {year}, {weekday}, {month_name}.
+# Weekday/month names are English abbreviations. No seconds timer.
+format = "{weekday}, {day} {month_name} {hour}:{minute}"
+
+[cpu]
+# Percentage of processor time busy across logical processors, sampled by delta.
+# The first sample needs one interval; -- indicates no measurement yet.
+format = "{percent}%"
+icon = "\uE950"
+# 500..60000 ms. Timer exists only while the module is visible.
+update_interval_ms = 2000
+
+[memory]
+# Physical RAM in use (total minus available). GiB is bytes / 1024^3.
+# Available placeholders: {percent}, {used_gib}, {total_gib}.
+format = "{used_gib}/{total_gib} GiB"
+icon = "\uE9D9"
+update_interval_ms = 5000

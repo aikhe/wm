@@ -3,8 +3,14 @@ name = "wm"
 version = "0.1.0"
 edition = "2024"
 publish = false
+default-run = "wm"
+
+[workspace]
+members = ["crates/bar-protocol", "crates/bar"]
+resolver = "3"
 
 [dependencies]
+wm-bar-protocol = { path = "crates/bar-protocol" }
 serde = { version = "1", features = ["derive"] }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 # Needed by name: the COM interface macro expands to `::windows_core` paths.

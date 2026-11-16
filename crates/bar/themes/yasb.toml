@@ -1,0 +1,48 @@
+# Matches Ike's .config/yasb styles: thin, flat, dark, compact Segoe text,
+# gray active workspace, centered date/time and system stats on the right.
+# Native Rust/GDI rendering; no YASB runtime or CSS engine.
+# Set wm's [layout] reserved_top = 18 when using this profile.
+
+[bar]
+height = 18
+padding = 2
+gap = 2
+workspace_width = 17
+max_workspaces = 12
+widget_padding = 2
+icon_gap = 2
+workspace_inset = 0
+title_max_width = 240
+
+[modules]
+left = ["workspaces", "title"]
+center = ["clock"]
+right = ["cpu", "memory"]
+
+[theme]
+# Static Segoe UI is installed on Windows 10/11; Variable may not be present.
+font = "Segoe UI"
+font_size = 11
+font_weight = 400
+icon_font = "Segoe MDL2 Assets"
+icon_size = 13
+workspace_font_size = 11
+background = "#101010"
+foreground = "#EDEDED"
+muted = "#868686"
+accent = "#4CC2FF"
+active_background = "#3D3C3D"
+active_foreground = "#EDEDED"
+
+[clock]
+format = "{weekday}, {day} {month_name} {hour}:{minute}"
+
+[cpu]
+format = "{percent}%"
+icon = "\uE950"
+update_interval_ms = 2000
+
+[memory]
+format = "{used_gib}/{total_gib} GiB"
+icon = "\uE9D9"
+update_interval_ms = 5000
