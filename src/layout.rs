@@ -1,3 +1,7 @@
+mod workspaces;
+
+pub use workspaces::Workspaces;
+
 /// A rectangle in physical screen pixels.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -7,18 +11,40 @@ pub struct Rect {
     pub height: i32,
 }
 
+/// Left and right act on columns, up and down on workspaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
     Right,
+    Up,
+    Down,
 }
 
-/// Where a window goes, and whether any part of it lands inside the viewport.
+/// Where a window goes, and whether it should be drawn there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placement<W> {
     pub window: W,
     pub rect: Rect,
     pub visible: bool,
+}
+
+/// One place along a row of columns or a stack of workspaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Back,
+    Forward,
+}
+
+impl Step {
+    /// The index one step away from `index` among `count` items, wrapping
+    /// round at the ends. `None` when there is nowhere else to go.
+    fn from(self, index: usize, count: usize) -> Option<usize> {
+        let step = match self {
+            Step::Back => count.checked_sub(1)?,
+            Step::Forward => 1,
+        };
+        (count > 1).then(|| (index + step) % count)
+    }
 }
 
 /// A column width as a fraction of the viewport: numerator, then denominator.
@@ -37,7 +63,7 @@ struct Column<W> {
 /// stays put and the row scrolls under it to keep the focused column visible.
 ///
 /// Generic over the window handle so the layout can be tested without Win32.
-pub struct Strip<W> {
+struct Strip<W> {
     viewport: Rect,
     gap: i32,
     columns: Vec<Column<W>>,
@@ -47,7 +73,7 @@ pub struct Strip<W> {
 }
 
 impl<W: Copy + PartialEq> Strip<W> {
-    pub fn new(viewport: Rect, gap: i32) -> Self {
+    fn new(viewport: Rect, gap: i32) -> Self {
         Strip {
             viewport,
             gap,
@@ -57,38 +83,48 @@ impl<W: Copy + PartialEq> Strip<W> {
         }
     }
 
-    pub fn contains(&self, window: W) -> bool {
+    fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    fn contains(&self, window: W) -> bool {
         self.position(window).is_some()
     }
 
-    /// Adds a column to the right of the focused one and focuses it.
-    pub fn insert(&mut self, window: W) {
+    fn focused(&self) -> Option<W> {
+        self.columns.get(self.focused).map(|column| column.window)
+    }
+
+    /// Adds a default-width column for the window. See `insert_column`.
+    fn insert(&mut self, window: W) {
         let width = self.width(DEFAULT_WIDTH);
+        self.insert_column(Column { window, width });
+    }
+
+    /// Adds the column to the right of the focused one and focuses it.
+    fn insert_column(&mut self, column: Column<W>) {
         self.focused = if self.columns.is_empty() {
             0
         } else {
             self.focused + 1
         };
-        self.columns.insert(self.focused, Column { window, width });
+        self.columns.insert(self.focused, column);
         self.reveal_focused();
     }
 
-    /// Removes the window's column. Focus stays on the same window, or moves to
-    /// a neighbour if the focused column was the one removed.
-    pub fn remove(&mut self, window: W) -> bool {
-        let Some(index) = self.position(window) else {
-            return false;
-        };
-        self.columns.remove(index);
-        if index < self.focused || self.focused == self.columns.len() {
-            self.focused = self.focused.saturating_sub(1);
-        }
-        self.reveal_focused();
-        true
+    /// Removes the window's column. Returns `false` if it isn't in the strip.
+    fn remove(&mut self, window: W) -> bool {
+        self.position(window)
+            .map(|index| self.take(index))
+            .is_some()
+    }
+
+    fn take_focused(&mut self) -> Option<Column<W>> {
+        (!self.is_empty()).then(|| self.take(self.focused))
     }
 
     /// Focuses the window's column. Returns `false` if it isn't in the strip.
-    pub fn focus(&mut self, window: W) -> bool {
+    fn focus(&mut self, window: W) -> bool {
         let Some(index) = self.position(window) else {
             return false;
         };
@@ -97,19 +133,22 @@ impl<W: Copy + PartialEq> Strip<W> {
         true
     }
 
-    /// Focuses the neighbouring column and returns its window. Wraps round at
-    /// the ends, and returns `None` when there is no other column.
-    pub fn focus_toward(&mut self, direction: Direction) -> Option<W> {
-        self.focused = self.neighbour(direction)?;
+    /// Focuses the neighbouring column, wrapping round at the ends. Returns
+    /// `false` when there is no other column.
+    fn focus_toward(&mut self, step: Step) -> bool {
+        let Some(target) = step.from(self.focused, self.columns.len()) else {
+            return false;
+        };
+        self.focused = target;
         self.reveal_focused();
-        Some(self.columns[self.focused].window)
+        true
     }
 
     /// Moves the focused column past its neighbour, keeping it focused. At an
     /// end it wraps round to the other one. Returns `false` when there is no
     /// other column.
-    pub fn move_toward(&mut self, direction: Direction) -> bool {
-        let Some(target) = self.neighbour(direction) else {
+    fn move_toward(&mut self, step: Step) -> bool {
+        let Some(target) = step.from(self.focused, self.columns.len()) else {
             return false;
         };
         let column = self.columns.remove(self.focused);
@@ -121,7 +160,7 @@ impl<W: Copy + PartialEq> Strip<W> {
 
     /// Steps the focused column to the next wider preset, wrapping round to
     /// the narrowest. Returns `false` if the strip is empty.
-    pub fn cycle_width(&mut self) -> bool {
+    fn cycle_width(&mut self) -> bool {
         let Some(current) = self.columns.get(self.focused).map(|column| column.width) else {
             return false;
         };
@@ -136,8 +175,8 @@ impl<W: Copy + PartialEq> Strip<W> {
     }
 
     /// Where every window goes. Columns scrolled out of view get rectangles
-    /// beyond the viewport's edges.
-    pub fn placements(&self) -> impl Iterator<Item = Placement<W>> {
+    /// beyond the viewport's edges and aren't visible.
+    fn placements(&self) -> impl Iterator<Item = Placement<W>> {
         let (start, end) = (self.viewport.x, self.viewport.x + self.viewport.width);
         let mut left = start + self.gap - self.scroll;
 
@@ -164,14 +203,15 @@ impl<W: Copy + PartialEq> Strip<W> {
             .position(|column| column.window == window)
     }
 
-    /// The column beside the focused one, wrapping round at the ends.
-    fn neighbour(&self, direction: Direction) -> Option<usize> {
-        let count = self.columns.len();
-        let step = match direction {
-            Direction::Left => count.checked_sub(1)?,
-            Direction::Right => 1,
-        };
-        (count > 1).then(|| (self.focused + step) % count)
+    /// Removes the column at `index`. Focus stays on the same window, or moves
+    /// to a neighbour if the focused column was the one removed.
+    fn take(&mut self, index: usize) -> Column<W> {
+        let column = self.columns.remove(index);
+        if index < self.focused || self.focused == self.columns.len() {
+            self.focused = self.focused.saturating_sub(1);
+        }
+        self.reveal_focused();
+        column
     }
 
     /// Sized so that columns whose fractions add up to one fill the viewport
@@ -248,14 +288,14 @@ mod tests {
         let mut strip = strip([1, 2, 3]);
         assert_eq!(xs(&strip), [-485, 10, 505]);
 
-        strip.focus_toward(Direction::Left);
+        strip.focus_toward(Step::Back);
         assert_eq!(
             xs(&strip),
             [-485, 10, 505],
             "already on screen, so nothing moves"
         );
 
-        strip.focus_toward(Direction::Left);
+        strip.focus_toward(Step::Back);
         assert_eq!(xs(&strip), [10, 505, 1000]);
     }
 
@@ -271,39 +311,33 @@ mod tests {
     #[test]
     fn focus_and_move_wrap_round_the_ends() {
         let mut strip = strip([1, 2, 3]);
-        assert_eq!(strip.focus_toward(Direction::Right), Some(1));
-        assert_eq!(strip.focus_toward(Direction::Left), Some(3));
+        strip.focus_toward(Step::Forward);
+        assert_eq!(strip.focused(), Some(1));
+        strip.focus_toward(Step::Back);
+        assert_eq!(strip.focused(), Some(3));
 
-        assert!(strip.move_toward(Direction::Right));
+        strip.move_toward(Step::Forward);
         assert_eq!(order(&strip), [3, 1, 2]);
-        assert!(strip.move_toward(Direction::Left));
+        strip.move_toward(Step::Back);
         assert_eq!(order(&strip), [1, 2, 3]);
+        assert_eq!(strip.focused(), Some(3), "focus stays on the moved column");
+    }
+
+    #[test]
+    fn a_lone_column_has_nowhere_to_go() {
+        let mut strip = strip([1]);
+        assert!(!strip.focus_toward(Step::Forward));
+        assert!(!strip.move_toward(Step::Back));
     }
 
     #[test]
     fn removing_a_column_keeps_focus_on_the_same_window() {
         let mut strip = strip([1, 2, 3]);
         strip.remove(1);
-        assert_eq!(strip.focus_toward(Direction::Left), Some(2));
+        assert_eq!(strip.focused(), Some(3));
 
-        strip.remove(2);
-        assert_eq!(
-            strip.focus_toward(Direction::Left),
-            None,
-            "3 is the only column left"
-        );
-    }
-
-    #[test]
-    fn moving_a_column_carries_focus_with_it() {
-        let mut strip = strip([1, 2, 3]);
-        assert!(strip.move_toward(Direction::Left));
-        assert_eq!(order(&strip), [1, 3, 2]);
-        assert_eq!(
-            strip.focus_toward(Direction::Right),
-            Some(2),
-            "focus followed 3"
-        );
+        strip.remove(3);
+        assert_eq!(strip.focused(), Some(2), "focus falls to the neighbour");
     }
 
     #[test]

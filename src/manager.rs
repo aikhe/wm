@@ -16,7 +16,7 @@ use windows::core::{BOOL, Result};
 
 use crate::cloak::{self, Cloaker};
 use crate::events::{self, Event};
-use crate::layout::{Direction, Placement, Rect, Strip};
+use crate::layout::{Direction, Placement, Rect, Workspaces};
 use crate::window::{Snapshot, Window};
 
 /// Space between columns and around the edge of the screen, in pixels.
@@ -34,11 +34,15 @@ enum Action {
 const ALT_SHIFT: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_SHIFT.0);
 
 /// Hotkeys as modifiers, key and action. A binding's index is its hotkey id.
-const BINDINGS: [(HOT_KEY_MODIFIERS, char, Action); 7] = [
+const BINDINGS: [(HOT_KEY_MODIFIERS, char, Action); 11] = [
     (MOD_ALT, 'H', Action::Focus(Direction::Left)),
     (MOD_ALT, 'L', Action::Focus(Direction::Right)),
+    (MOD_ALT, 'K', Action::Focus(Direction::Up)),
+    (MOD_ALT, 'J', Action::Focus(Direction::Down)),
     (ALT_SHIFT, 'H', Action::Move(Direction::Left)),
     (ALT_SHIFT, 'L', Action::Move(Direction::Right)),
+    (ALT_SHIFT, 'K', Action::Move(Direction::Up)),
+    (ALT_SHIFT, 'J', Action::Move(Direction::Down)),
     (MOD_ALT, 'R', Action::CycleWidth),
     (ALT_SHIFT, 'W', Action::Close),
     (ALT_SHIFT, 'Q', Action::Quit),
@@ -60,7 +64,7 @@ pub fn run() -> Result<()> {
 
     let mut manager = Manager::new()?;
     println!(
-        "Tiling. Alt+H/L focus, Alt+Shift+H/L move, Alt+R width, Alt+Shift+W close,          Alt+Shift+Q quit and restore."
+        "Tiling. Alt+H/J/K/L focus, Alt+Shift+H/J/K/L move, Alt+R width, Alt+Shift+W close,          Alt+Shift+Q quit and restore."
     );
 
     let mut message = MSG::default();
@@ -95,7 +99,7 @@ unsafe extern "system" fn stop_loop(_control: u32) -> BOOL {
 }
 
 struct Manager {
-    strip: Strip<Window>,
+    layout: Workspaces<Window>,
     cloaker: Cloaker,
     /// Where each window was last sent, so unchanged ones aren't moved again.
     placed: Vec<(Window, Rect)>,
@@ -107,7 +111,7 @@ impl Manager {
     /// Adopts the windows already open, left to right as they sit on screen.
     fn new() -> Result<Self> {
         let mut manager = Manager {
-            strip: Strip::new(work_area()?, GAP),
+            layout: Workspaces::new(work_area()?, GAP),
             cloaker: Cloaker::new()?,
             placed: Vec::new(),
             originals: Vec::new(),
@@ -126,7 +130,7 @@ impl Manager {
             .for_each(|(window, _)| manager.adopt(window));
 
         if let Some(window) = Window::foreground() {
-            manager.strip.focus(window);
+            manager.layout.focus(window);
         }
         manager.apply();
         Ok(manager)
@@ -134,39 +138,35 @@ impl Manager {
 
     /// Carries out a hotkey. Breaks when the manager should exit.
     fn perform(&mut self, action: Action) -> ControlFlow<()> {
-        match action {
-            Action::Focus(direction) => {
-                if let Some(window) = self.strip.focus_toward(direction) {
-                    self.apply();
-                    window.focus();
-                }
-            }
-            Action::Move(direction) => {
-                if self.strip.move_toward(direction) {
-                    self.apply();
-                }
-            }
-            Action::CycleWidth => {
-                if self.strip.cycle_width() {
-                    self.apply();
-                }
-            }
-            // Only a tiled window: the desktop can have focus too, and
-            // closing that asks to shut Windows down.
+        let changed = match action {
+            Action::Focus(direction) => self.layout.focus_toward(direction),
+            Action::Move(direction) => self.layout.move_toward(direction),
+            Action::CycleWidth => self.layout.cycle_width(),
             Action::Close => {
-                if let Some(window) = Window::foreground().filter(|w| self.strip.contains(*w)) {
+                // Only a tiled window: the desktop can have focus too, and
+                // closing that asks to shut Windows down.
+                let tiled = Window::foreground().filter(|window| self.layout.contains(*window));
+                if let Some(window) = tiled {
                     window.close();
                 }
+                false
             }
             Action::Quit => return ControlFlow::Break(()),
+        };
+
+        if changed {
+            self.apply();
+            self.focus_layout();
         }
         ControlFlow::Continue(())
     }
 
     fn handle(&mut self, event: Event) {
+        let focused = self.layout.focused();
+
         let changed = match event {
             Event::Appeared(window) => {
-                let new = !self.strip.contains(window) && window.is_tileable();
+                let new = !self.layout.contains(window) && window.is_tileable();
                 if new {
                     self.adopt(window);
                 }
@@ -177,19 +177,37 @@ impl Manager {
             Event::Cloaked(window) => !cloak::is_cloaked(window) && self.release(window),
             Event::Destroyed(window) => {
                 self.originals.retain(|(known, _)| *known != window);
-                self.strip.remove(window)
+                self.layout.remove(window)
             }
-            Event::Focused(window) => self.strip.focus(window),
+            // Windows reports each window it passes through on the way to the
+            // one that ends up focused; only that last one matters.
+            Event::Focused(window) => {
+                Window::foreground() == Some(window) && self.layout.focus(window)
+            }
             Event::Moved(window) => {
                 // Forget where it was sent so it snaps back into its column.
                 self.placed.retain(|(placed, _)| *placed != window);
-                self.strip.contains(window)
+                self.layout.contains(window)
             }
         };
 
         if changed {
             self.apply();
+            // When a window goes away Windows activates one of its own
+            // choosing, which may be off screen. Ours takes over.
+            if !matches!(event, Event::Focused(_)) && self.layout.focused() != focused {
+                self.focus_layout();
+            }
         }
+    }
+
+    /// Gives keyboard focus to the layout's focused window, or to the desktop
+    /// on an empty workspace so that no hidden window keeps it.
+    fn focus_layout(&self) {
+        self.layout
+            .focused()
+            .unwrap_or_else(Window::desktop)
+            .focus();
     }
 
     fn adopt(&mut self, window: Window) {
@@ -197,13 +215,13 @@ impl Manager {
         if let (false, Some(snapshot)) = (known, window.snapshot()) {
             self.originals.push((window, snapshot));
         }
-        self.strip.insert(window);
+        self.layout.insert(window);
     }
 
     /// Drops a live window from the layout, uncloaking it so it isn't left
     /// invisible. Returns `false` if it wasn't in the layout.
     fn release(&mut self, window: Window) -> bool {
-        let removed = self.strip.remove(window);
+        let removed = self.layout.remove(window);
         if removed && cloak::is_cloaked(window) {
             self.cloaker.set(window, false);
         }
@@ -211,16 +229,16 @@ impl Manager {
     }
 
     /// Moves the windows whose rectangle changed since the last call, and
-    /// cloaks the ones that are entirely off screen.
+    /// cloaks the ones that are off screen or on another workspace.
     fn apply(&mut self) {
         let placed = std::mem::take(&mut self.placed);
 
-        for Placement {
-            window,
-            rect,
-            visible,
-        } in self.strip.placements()
-        {
+        for placement in self.layout.placements() {
+            let Placement {
+                window,
+                rect,
+                visible,
+            } = placement;
             if visible == cloak::is_cloaked(window) {
                 self.cloaker.set(window, !visible);
             }

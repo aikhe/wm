@@ -12,11 +12,11 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetWindow,
-    GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SW_HIDE, SW_SHOWMAXIMIZED,
-    SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPlacement, SetWindowPos,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow,
+    GetShellWindow, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SW_HIDE,
+    SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPlacement, SetWindowPos,
     ShowWindowAsync, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_CLOSE,
     WPF_ASYNCWINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_DLGMODALFRAME,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -48,6 +48,11 @@ impl Window {
         let mut windows = Vec::new();
         unsafe { EnumWindows(Some(collect), LPARAM(&raw mut windows as isize))? };
         Ok(windows)
+    }
+
+    /// The desktop itself, which can hold focus when no window should.
+    pub fn desktop() -> Window {
+        Window(unsafe { GetShellWindow() })
     }
 
     /// The window the user is typing into, if any.
