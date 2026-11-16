@@ -1,19 +1,21 @@
 //! A zoomed-out view of every workspace, stacked top to bottom, with a live
 //! picture of each window where it sits in its strip.
 //!
-//! The view is one full-screen window of ours. Windows draws the pictures
-//! into it (DWM thumbnails, as Alt+Tab uses), so they stay live at no cost to
-//! us, and because hidden windows are cloaked rather than minimized they keep
-//! updating too. Showing the view never waits on another app.
+//! The view's own window is only the backdrop: the rows and their numbers.
+//! The pictures are the stage's, which sits above it, and so is the highlight
+//! round the focused one, which has to move with its picture and show above
+//! the ones beside it. Opening is the desktop's windows shrinking into their
+//! rows while the backdrop fades in behind them, and closing is the reverse.
+//! Because hidden windows are cloaked rather than minimized their pictures
+//! stay live, and showing the view never waits on another app.
 //!
 //! It keeps nothing of its own beyond what it last drew. The highlighted
 //! window is the layout's focused one, so every hotkey works on the view as
 //! it does on the desktop.
 
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{
-    DWM_THUMBNAIL_PROPERTIES, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE, DwmRegisterThumbnail,
-    DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+use windows::Win32::Foundation::{
+    COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT,
+    WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BLACK_BRUSH, BeginPaint, DC_BRUSH, DEFAULT_GUI_FONT, EndPaint, FillRect, GetStockObject,
@@ -22,14 +24,17 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetSystemMetrics, IDC_ARROW, LoadCursorW, MSG, RegisterClassW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, ShowWindow, WNDCLASSW, WS_EX_TOOLWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, IDC_ARROW, LWA_ALPHA,
+    LoadCursorW, MSG, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW,
+    SetLayeredWindowAttributes, ShowWindow, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Error, PCWSTR, Result, w};
 
+use crate::animation::{Animations, Slide, Spring};
 use crate::config::OverviewStyle;
-use crate::layout::{Rect, Workspaces};
+use crate::layout::{Placement, Rect, Workspaces};
+use crate::stage::{Ring, Stage};
 use crate::window::Window;
 
 const CLASS: PCWSTR = w!("wm.overview");
@@ -94,23 +99,16 @@ impl Map {
     }
 }
 
-/// A window as drawn in the view.
-struct Card {
-    window: Window,
-    rect: Rect,
-    /// The live picture Windows draws over `rect`, if it would give us one.
-    thumbnail: Option<isize>,
-}
-
 /// What the view last drew, which clicks are matched against.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 struct Scene {
     /// Each workspace's viewport, from the top.
     rows: Vec<Rect>,
     active: usize,
-    /// Bottom-most first.
-    cards: Vec<Card>,
-    focused: Option<Window>,
+    /// Where each window's picture comes to rest, bottom-most first.
+    cards: Vec<(Window, Rect)>,
+    /// The cards of windows that Windows gave no picture of.
+    blank: Vec<Rect>,
 }
 
 /// What a click in the view landed on.
@@ -123,13 +121,18 @@ pub struct Overview {
     window: Window,
     screen: Rect,
     open: bool,
+    /// Opened, but not yet on screen with the keyboard: `show` does that.
+    opening: bool,
     scene: Scene,
     style: OverviewStyle,
+    animations: Animations,
+    /// How opaque the backdrop is, from 0 to 255. It hides once faded out.
+    fade: Spring,
 }
 
 impl Overview {
     /// Creates the view's window, which stays hidden until `open`.
-    pub fn new(style: OverviewStyle) -> Result<Self> {
+    pub fn new(style: OverviewStyle, animations: Animations) -> Result<Self> {
         let screen = Rect {
             x: 0,
             y: 0,
@@ -146,12 +149,13 @@ impl Overview {
                 lpszClassName: CLASS,
                 ..Default::default()
             };
-            if RegisterClassW(&class) == 0 {
+            if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
                 return Err(Error::from_thread());
             }
-            // A tool window, so it stays out of the taskbar and Alt+Tab.
+            // A tool window, so it stays out of the taskbar and Alt+Tab, and
+            // layered so that it can fade.
             CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
                 CLASS,
                 w!("wm overview"),
                 WS_POPUP,
@@ -166,21 +170,33 @@ impl Overview {
             )?
         };
 
+        Window(hwnd).disable_native_transitions();
         Ok(Overview {
             window: Window(hwnd),
             screen,
             open: false,
+            opening: false,
             scene: Scene::default(),
             style,
+            animations,
+            fade: Spring::at(0.0),
         })
+    }
+
+    /// The view's window, which the stage is kept above.
+    pub fn window(&self) -> Window {
+        self.window
     }
 
     pub fn is_open(&self) -> bool {
         self.open
     }
 
-    pub fn configure(&mut self, style: OverviewStyle) {
+    pub fn configure(&mut self, style: OverviewStyle, animations: Animations) {
+        self.finish();
         self.style = style;
+        self.animations = animations;
+        let _ = unsafe { InvalidateRect(Some(self.window.0), None, false) };
     }
 
     /// Whether the message was meant for the view's window.
@@ -188,99 +204,151 @@ impl Overview {
         message.hwnd == self.window.0
     }
 
-    /// Puts the view on screen and gives it the keyboard. It's blank until
-    /// `show` is next called.
+    /// Opens the view. It comes on screen and takes the keyboard when `show`
+    /// is next called.
     pub fn open(&mut self) {
         self.open = true;
-        let _ = unsafe { ShowWindow(self.window.0, SW_SHOW) };
-        self.window.focus();
+        self.opening = true;
     }
 
-    /// Takes the view off screen. Give another window the keyboard first, or
-    /// Windows picks one itself.
-    pub fn close(&mut self) {
-        self.open = false;
-        self.drop_thumbnails();
-        self.scene = Scene::default();
-        let _ = unsafe { ShowWindow(self.window.0, SW_HIDE) };
-    }
-
-    /// Redraws the view from the layout. Does nothing while it's closed.
-    pub fn show(&mut self, layout: &Workspaces<Window>) {
+    /// Sends every window's picture to its place in the view, the highlight
+    /// with the focused one, and repaints the backdrop if it changed. Does
+    /// nothing while the view is closed.
+    pub fn show(&mut self, layout: &Workspaces<Window>, stage: &mut Stage) {
         if !self.open {
             return;
         }
         let (active, count) = layout.active();
-        let focused = layout.focused();
         let map = Map::new(self.screen, layout.viewport(), count, &self.style);
-        let drawn: Vec<_> = layout
+        let slides: Vec<_> = layout
             .placements()
             .map(|placement| {
                 let window = placement.window;
                 let rect = placement.rect.unwrap_or_else(|| window.bounds());
-                (window, map.card(placement.workspace, rect))
+                Slide {
+                    window,
+                    from: self.desktop(active, &placement),
+                    to: map.card(placement.workspace, rect),
+                }
             })
             .collect();
+        stage.highlight(layout.focused().map(|window| Ring {
+            window,
+            colour: self.style.highlight,
+            width: self.style.highlight_width,
+        }));
+        stage.present(&slides, self.screen, self.rate(), true);
 
-        // Thumbnails stack in the order they were made, so they are only
-        // kept while the windows and their order are unchanged.
-        let before = self.scene.cards.iter().map(|card| card.window);
-        let unchanged = before.eq(drawn.iter().map(|(window, _)| *window));
-        let thumbnails: Vec<_> = if unchanged {
-            let kept = self.scene.cards.iter();
-            kept.map(|card| card.thumbnail).collect()
-        } else {
-            self.drop_thumbnails();
-            let register =
-                |window: Window| unsafe { DwmRegisterThumbnail(self.window.0, window.0) };
-            let made = drawn.iter().map(|(window, _)| register(*window).ok());
-            made.collect()
-        };
-
-        let cards: Vec<_> = drawn
-            .into_iter()
-            .zip(thumbnails)
-            .map(|((window, rect), thumbnail)| Card {
-                window,
-                rect,
-                thumbnail,
-            })
-            .collect();
-        for card in &cards {
-            // The focused window's picture is drawn smaller, so the
-            // highlight painted behind it shows all the way round.
-            let rect = if Some(card.window) == focused {
-                card.rect.inset(
-                    self.style
-                        .highlight_width
-                        .min((card.rect.width.min(card.rect.height) - 1).max(0) / 2),
-                )
-            } else {
-                card.rect
-            };
-            let properties = DWM_THUMBNAIL_PROPERTIES {
-                dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE,
-                rcDestination: rect.into(),
-                fVisible: true.into(),
-                ..Default::default()
-            };
-            if let Some(thumbnail) = card.thumbnail {
-                // Fails only if the window is gone, and an event will tell us.
-                let _ = unsafe { DwmUpdateThumbnailProperties(thumbnail, &properties) };
-            }
-        }
-
-        self.scene = Scene {
+        let scene = Scene {
             rows: (0..count).map(|workspace| map.row(workspace)).collect(),
             active,
-            cards,
-            focused,
+            cards: slides
+                .iter()
+                .map(|slide| (slide.window, slide.to))
+                .collect(),
+            blank: slides
+                .iter()
+                .filter(|slide| !stage.shows(slide.window))
+                .map(|slide| slide.to)
+                .collect(),
         };
-        let _ = unsafe { InvalidateRect(Some(self.window.0), None, true) };
+        if scene != self.scene {
+            self.scene = scene;
+            let _ = unsafe { InvalidateRect(Some(self.window.0), None, false) };
+        }
+        if self.opening {
+            self.opening = false;
+            self.fade.aim(255.0);
+            if self.rate().is_none() {
+                self.fade.finish();
+            }
+            self.blend();
+            let _ = unsafe { ShowWindow(self.window.0, SW_SHOW) };
+            self.window.focus();
+        }
     }
 
-    /// Paints what the thumbnails don't cover: the rows, their numbers, and
-    /// the highlight. Call it when Windows asks the view to paint.
+    /// Zooms back out to the desktop: the pictures return to where the real
+    /// windows are and the backdrop fades away. Give another window the
+    /// keyboard first, or Windows picks one itself.
+    pub fn close(&mut self, layout: &Workspaces<Window>, stage: &mut Stage) {
+        self.open = false;
+        self.opening = false;
+        let active = layout.active().0;
+        let slides: Vec<_> = layout
+            .placements()
+            .map(|placement| {
+                let rect = self.desktop(active, &placement);
+                Slide {
+                    window: placement.window,
+                    from: rect,
+                    to: rect,
+                }
+            })
+            .collect();
+        stage.highlight(None);
+        stage.present(&slides, self.screen, self.rate(), false);
+        self.fade.aim(0.0);
+        if self.rate().is_none() {
+            self.finish();
+        }
+    }
+
+    /// Where the window's picture is on the desktop, seen from the view: the
+    /// workspaces are stacked a screen apart, so the ones that aren't on
+    /// screen lie above and below it.
+    fn desktop(&self, active: usize, placement: &Placement<Window>) -> Rect {
+        let rect = placement.window.pose(placement.rect);
+        let below = placement.workspace as i32 - active as i32;
+        Rect {
+            y: rect.y + below * self.screen.height,
+            ..rect
+        }
+    }
+
+    fn rate(&self) -> Option<f64> {
+        self.animations.rate(self.animations.overview)
+    }
+
+    pub fn animating(&self) -> bool {
+        !self.fade.settled()
+    }
+
+    /// Advances the backdrop's fade by `seconds`.
+    pub fn tick(&mut self, seconds: f64) {
+        if self.fade.settled() {
+            return;
+        }
+        match self.rate() {
+            Some(rate) => self.fade.step(rate, seconds),
+            None => self.fade.finish(),
+        }
+        self.blend();
+        self.hide_when_faded();
+    }
+
+    /// Ends the fade now.
+    pub fn finish(&mut self) {
+        self.fade.finish();
+        self.blend();
+        self.hide_when_faded();
+    }
+
+    fn blend(&self) {
+        let alpha = self.fade.value().clamp(0, 255) as u8;
+        let _ = unsafe { SetLayeredWindowAttributes(self.window.0, COLORREF(0), alpha, LWA_ALPHA) };
+    }
+
+    fn hide_when_faded(&mut self) {
+        if !self.open && self.fade.settled() {
+            self.scene = Scene::default();
+            let _ = unsafe { ShowWindow(self.window.0, SW_HIDE) };
+        }
+    }
+
+    /// Paints the backdrop: the rows, their numbers, and a plain card for
+    /// each window there's no picture of. Call it when Windows asks the view
+    /// to paint.
     pub fn paint(&self) {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
@@ -308,30 +376,22 @@ impl Overview {
                 let number: Vec<u16> = (workspace + 1).to_string().encode_utf16().collect();
                 let _ = TextOutW(dc, row.x - row.height / 8, row.y, &number);
             }
-            for card in &self.scene.cards {
-                let focused = Some(card.window) == self.scene.focused;
-                fill(
-                    card.rect,
-                    if focused {
-                        self.style.highlight
-                    } else {
-                        self.style.card
-                    },
-                );
+            for rect in &self.scene.blank {
+                fill(*rect, self.style.card);
             }
 
             let _ = EndPaint(self.window.0, &paint);
         }
     }
 
-    /// What was drawn at a point in the view, the window on top winning.
+    /// What is drawn at a point in the view, the window on top winning.
     /// Anywhere level with a workspace's row counts as that workspace.
     pub fn target(&self, x: i32, y: i32) -> Option<Target> {
         let mut cards = self.scene.cards.iter().rev();
         let level = |row: &Rect| (row.y..row.y + row.height).contains(&y);
         cards
-            .find(|card| card.rect.contains(x, y))
-            .map(|card| Target::Window(card.window))
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(window, _)| Target::Window(*window))
             .or_else(|| {
                 self.scene
                     .rows
@@ -340,13 +400,11 @@ impl Overview {
                     .map(Target::Workspace)
             })
     }
+}
 
-    fn drop_thumbnails(&mut self) {
-        for card in &mut self.scene.cards {
-            if let Some(thumbnail) = card.thumbnail.take() {
-                let _ = unsafe { DwmUnregisterThumbnail(thumbnail) };
-            }
-        }
+impl Drop for Overview {
+    fn drop(&mut self) {
+        let _ = unsafe { DestroyWindow(self.window.0) };
     }
 }
 
@@ -406,22 +464,5 @@ mod tests {
             card(200),
             "a column scrolled off the screen sits beside the viewport"
         );
-    }
-
-    /// Needs a desktop session with an app window open, so it doesn't run by
-    /// default. Nothing shows on screen: the view stays hidden.
-    #[test]
-    #[ignore]
-    fn windows_gives_the_view_a_picture_of_another_apps_window() {
-        let overview = Overview::new(crate::config::Config::parse("").unwrap().style)
-            .expect("the view's window is created");
-        let open = Window::visible().expect("windows can be listed");
-        let window = open
-            .into_iter()
-            .find(|window| window.is_tileable())
-            .expect("an app window");
-
-        let thumbnail = unsafe { DwmRegisterThumbnail(overview.window.0, window.0) };
-        assert!(thumbnail.is_ok(), "{thumbnail:?}");
     }
 }

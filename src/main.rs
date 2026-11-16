@@ -1,12 +1,18 @@
+mod animation;
+#[cfg(test)]
+mod animation_probe;
 mod bindings;
 mod cloak;
 mod config;
 mod config_watch;
 mod events;
+mod frame_clock;
 mod layout;
 mod manager;
 mod overview;
 mod rules;
+mod stage;
+mod thumbnail;
 mod window;
 
 use std::process::ExitCode;

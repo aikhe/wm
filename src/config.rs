@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use windows::Win32::Foundation::COLORREF;
 
+use crate::animation::Animations;
 use crate::bindings::{self, Binding};
 use crate::layout::{Fraction, Mode, Options, Rect, Width};
 use crate::rules::Rule;
@@ -19,6 +20,7 @@ struct Document {
     layout: Layout,
     behavior: Behavior,
     overview: Overview,
+    animations: Animations,
     hotkeys: BTreeMap<String, String>,
     window_rules: Vec<WindowRule>,
 }
@@ -152,6 +154,7 @@ pub struct Config {
     pub layout: Layout,
     pub behavior: Behavior,
     pub overview: Overview,
+    pub animations: Animations,
     pub options: Options,
     pub style: OverviewStyle,
     pub bindings: Vec<Binding>,
@@ -166,9 +169,11 @@ impl Config {
             layout,
             behavior,
             overview,
+            animations,
             hotkeys,
             window_rules,
         } = document;
+        animations.validate()?;
         range("layout.gap", layout.gap, 0, 10_000)?;
         range("layout.min_width_percent", layout.min_width_percent, 1, 90)?;
         range(
@@ -255,6 +260,7 @@ impl Config {
             layout,
             behavior,
             overview,
+            animations,
             options,
             style,
             bindings,
@@ -406,6 +412,7 @@ mod tests {
         assert_eq!(example.bindings, empty.bindings);
         assert_eq!(example.options, empty.options);
         assert_eq!(example.style, empty.style);
+        assert_eq!(example.animations, empty.animations);
         // Serialize-free comparison catches every extra field's default too.
         let explicit: Document = toml::from_str(DEFAULT_CONFIG).unwrap();
         let omitted = Document::default();
@@ -434,6 +441,10 @@ mod tests {
             "[layout]\nwidth_presets=['2/3','1/2']",
             "[layout]\ndefault_width='1/0'",
             "[overview]\nhighlight='white'",
+            "[animations]\neasing='linear'",
+            "[animations.horizontal]\nduration_ms=-1",
+            "[animations.workspaces]\nduration_ms=2001",
+            "[animations.overview]\nenabeld=true",
             "[hotkeys]\nquit=''",
             "[hotkeys]\nfocas_left='Alt+H'",
             "[[window_rules]]\nmode='float'",
@@ -452,6 +463,26 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn animation_switches_and_zero_duration_disable_only_the_selected_effect() {
+        let config = Config::parse(
+            "[animations.horizontal]\nenabled=false\n[animations.workspaces]\nduration_ms=0",
+        )
+        .unwrap();
+        let settings = config.animations;
+        assert_eq!(
+            settings.horizontal.duration_ms, 300,
+            "kept when only switched off"
+        );
+        assert!(settings.rate(settings.horizontal).is_none());
+        assert!(settings.rate(settings.workspaces).is_none());
+        assert!(settings.rate(settings.overview).is_some());
+        let disabled = Config::parse("[animations]\nenabled=false")
+            .unwrap()
+            .animations;
+        assert!(disabled.rate(disabled.overview).is_none());
     }
 
     #[test]

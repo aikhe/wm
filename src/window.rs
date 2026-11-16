@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWINDOWATTRIBUTE, DwmGetWindowAttribute,
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_TRANSITIONS_FORCEDISABLED,
+    DWMWINDOWATTRIBUTE, DwmGetWindowAttribute, DwmSetWindowAttribute,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -35,6 +36,20 @@ pub type Snapshot = WINDOWPLACEMENT;
 pub struct Window(pub HWND);
 
 impl Window {
+    /// Stops Windows fading or zooming the window as it shows and hides.
+    /// For our own surfaces, which animate what's on them themselves.
+    pub fn disable_native_transitions(self) {
+        let disabled = BOOL(1);
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                self.0,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                (&raw const disabled).cast(),
+                size_of::<BOOL>() as u32,
+            )
+        };
+    }
+
     /// Every visible top-level window, in z-order from the top.
     pub fn visible() -> Result<Vec<Window>> {
         unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -70,14 +85,20 @@ impl Window {
             class: self.class(),
             bounds: self.bounds(),
             visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
-            cloaked: self
-                .dwm_attribute::<u32>(DWMWA_CLOAKED)
-                .is_some_and(|cloaked| cloaked != 0),
+            cloaked: self.cloaked(),
             minimized: unsafe { IsIconic(hwnd) }.as_bool(),
             owned: unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|owner| !owner.is_invalid()),
             style: WINDOW_STYLE(style(GWL_STYLE)),
             ex_style: WINDOW_EX_STYLE(style(GWL_EXSTYLE)),
         }
+    }
+
+    /// Whether Windows is keeping the window off the screen right now,
+    /// whoever asked it to. Windows shows a cloaked window again by itself
+    /// once it takes the keyboard.
+    pub fn cloaked(self) -> bool {
+        self.dwm_attribute::<u32>(DWMWA_CLOAKED)
+            .is_some_and(|cloaked| cloaked != 0)
     }
 
     pub fn title(self) -> String {
@@ -245,6 +266,22 @@ impl Window {
     /// if it can't be measured.
     pub fn bounds(self) -> Rect {
         self.frame().unwrap_or_default().into()
+    }
+
+    /// Where the window's picture belongs on the desktop: in the layout's
+    /// `slot` at the size the window really is, so that it's never scaled. A
+    /// floating window has no slot, and is wherever it is.
+    pub fn pose(self, slot: Option<Rect>) -> Rect {
+        let actual = self.bounds();
+        match slot {
+            Some(slot) if actual.width > 0 && actual.height > 0 => Rect {
+                width: actual.width,
+                height: actual.height,
+                ..slot
+            },
+            Some(slot) => slot,
+            None => actual,
+        }
     }
 
     /// The visible frame, which excludes the invisible resize border.
