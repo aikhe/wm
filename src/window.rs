@@ -3,7 +3,7 @@ use std::fmt;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWINDOWATTRIBUTE, DwmGetWindowAttribute,
 };
@@ -14,11 +14,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput}
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow, GetWindow,
     GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, IsZoomed, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE,
-    SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPlacement, SetWindowPos, ShowWindowAsync, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WINDOWPLACEMENT, WPF_ASYNCWINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
-    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SW_HIDE, SW_SHOWMAXIMIZED,
+    SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPlacement, SetWindowPos,
+    ShowWindowAsync, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_CLOSE,
+    WPF_ASYNCWINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_DLGMODALFRAME,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, PWSTR, Result};
 
@@ -152,6 +153,12 @@ impl Window {
             )
         };
         !maximized
+    }
+
+    /// Asks the app to close the window, as its close button would.
+    pub fn close(self) {
+        // Fails only if the window is already gone.
+        let _ = unsafe { PostMessageW(Some(self.0), WM_CLOSE, WPARAM(0), LPARAM(0)) };
     }
 
     /// Makes this the foreground window.

@@ -97,21 +97,23 @@ impl<W: Copy + PartialEq> Strip<W> {
         true
     }
 
-    /// Focuses the neighbouring column and returns its window, or `None` at
-    /// the end of the strip.
+    /// Focuses the neighbouring column and returns its window. Wraps round at
+    /// the ends, and returns `None` when there is no other column.
     pub fn focus_toward(&mut self, direction: Direction) -> Option<W> {
         self.focused = self.neighbour(direction)?;
         self.reveal_focused();
         Some(self.columns[self.focused].window)
     }
 
-    /// Swaps the focused column with its neighbour, keeping it focused.
-    /// Returns `false` at the end of the strip.
+    /// Moves the focused column past its neighbour, keeping it focused. At an
+    /// end it wraps round to the other one. Returns `false` when there is no
+    /// other column.
     pub fn move_toward(&mut self, direction: Direction) -> bool {
         let Some(target) = self.neighbour(direction) else {
             return false;
         };
-        self.columns.swap(self.focused, target);
+        let column = self.columns.remove(self.focused);
+        self.columns.insert(target, column);
         self.focused = target;
         self.reveal_focused();
         true
@@ -162,12 +164,14 @@ impl<W: Copy + PartialEq> Strip<W> {
             .position(|column| column.window == window)
     }
 
+    /// The column beside the focused one, wrapping round at the ends.
     fn neighbour(&self, direction: Direction) -> Option<usize> {
-        let index = match direction {
-            Direction::Left => self.focused.checked_sub(1)?,
-            Direction::Right => self.focused + 1,
+        let count = self.columns.len();
+        let step = match direction {
+            Direction::Left => count.checked_sub(1)?,
+            Direction::Right => 1,
         };
-        (index < self.columns.len()).then_some(index)
+        (count > 1).then(|| (self.focused + step) % count)
     }
 
     /// Sized so that columns whose fractions add up to one fill the viewport
@@ -265,11 +269,15 @@ mod tests {
     }
 
     #[test]
-    fn focus_stops_at_the_ends() {
-        let mut strip = strip([1, 2]);
-        assert_eq!(strip.focus_toward(Direction::Right), None);
-        assert_eq!(strip.focus_toward(Direction::Left), Some(1));
-        assert_eq!(strip.focus_toward(Direction::Left), None);
+    fn focus_and_move_wrap_round_the_ends() {
+        let mut strip = strip([1, 2, 3]);
+        assert_eq!(strip.focus_toward(Direction::Right), Some(1));
+        assert_eq!(strip.focus_toward(Direction::Left), Some(3));
+
+        assert!(strip.move_toward(Direction::Right));
+        assert_eq!(order(&strip), [3, 1, 2]);
+        assert!(strip.move_toward(Direction::Left));
+        assert_eq!(order(&strip), [1, 2, 3]);
     }
 
     #[test]
@@ -296,8 +304,6 @@ mod tests {
             Some(2),
             "focus followed 3"
         );
-
-        assert!(!strip.move_toward(Direction::Right), "2 is already last");
     }
 
     #[test]

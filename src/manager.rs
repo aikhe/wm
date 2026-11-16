@@ -27,18 +27,20 @@ enum Action {
     Focus(Direction),
     Move(Direction),
     CycleWidth,
+    Close,
     Quit,
 }
 
 const ALT_SHIFT: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_SHIFT.0);
 
 /// Hotkeys as modifiers, key and action. A binding's index is its hotkey id.
-const BINDINGS: [(HOT_KEY_MODIFIERS, char, Action); 6] = [
+const BINDINGS: [(HOT_KEY_MODIFIERS, char, Action); 7] = [
     (MOD_ALT, 'H', Action::Focus(Direction::Left)),
     (MOD_ALT, 'L', Action::Focus(Direction::Right)),
     (ALT_SHIFT, 'H', Action::Move(Direction::Left)),
     (ALT_SHIFT, 'L', Action::Move(Direction::Right)),
     (MOD_ALT, 'R', Action::CycleWidth),
+    (ALT_SHIFT, 'W', Action::Close),
     (ALT_SHIFT, 'Q', Action::Quit),
 ];
 
@@ -58,7 +60,7 @@ pub fn run() -> Result<()> {
 
     let mut manager = Manager::new()?;
     println!(
-        "Tiling. Alt+H/L focus, Alt+Shift+H/L move, Alt+R width, Alt+Shift+Q quit and restore."
+        "Tiling. Alt+H/L focus, Alt+Shift+H/L move, Alt+R width, Alt+Shift+W close,          Alt+Shift+Q quit and restore."
     );
 
     let mut message = MSG::default();
@@ -147,6 +149,13 @@ impl Manager {
             Action::CycleWidth => {
                 if self.strip.cycle_width() {
                     self.apply();
+                }
+            }
+            // Only a tiled window: the desktop can have focus too, and
+            // closing that asks to shut Windows down.
+            Action::Close => {
+                if let Some(window) = Window::foreground().filter(|w| self.strip.contains(*w)) {
+                    window.close();
                 }
             }
             Action::Quit => return ControlFlow::Break(()),

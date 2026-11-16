@@ -44,8 +44,8 @@ Don't use GlazeWM as a reference; Ike finds it too slow.
 ## Running
 
 - `cargo run` tiles the desktop. Alt+H/L moves focus, Alt+Shift+H/L moves the
-  column, Alt+R cycles its width, Alt+Shift+Q or Ctrl+C quits and restores
-  every window.
+  column, Alt+R cycles its width, Alt+Shift+W closes the window, Alt+Shift+Q or
+  Ctrl+C quits and restores every window. Focus and move wrap round the ends.
 - `cargo run -- list` prints what would be tiled and what is skipped, with the
   reason, without touching anything.
 - `cargo test -- --ignored` cloaks and uncloaks one real window to check the
