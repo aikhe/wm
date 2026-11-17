@@ -1,6 +1,6 @@
 mod workspaces;
 
-pub use workspaces::Workspaces;
+pub use workspaces::{Arranged, Workspaces};
 
 /// A rectangle in physical screen pixels.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -186,8 +186,26 @@ impl<W: Copy + PartialEq> Strip<W> {
     /// Adds a column for the window at the given width, kept within what
     /// fits, or at the default one. See `insert_column`.
     fn insert(&mut self, window: W, width: Option<Width>) {
+        let width = self.fit(width);
+        self.insert_column(Column { window, width });
+    }
+
+    /// Adds a column for the window at `index`, keeping focus on the column
+    /// that had it.
+    fn put(&mut self, index: usize, window: W, width: Option<Width>) {
+        let width = self.fit(width);
+        let index = index.min(self.columns.len());
+        if index <= self.focused && !self.columns.is_empty() {
+            self.focused += 1;
+        }
+        self.columns.insert(index, Column { window, width });
+        self.reveal_focused();
+    }
+
+    /// The given width kept within what fits, or the default one.
+    fn fit(&self, width: Option<Width>) -> Width {
         let (narrowest, widest) = self.limits();
-        let width = match width {
+        match width {
             Some(width) => Width {
                 pixels: width.pixels.clamp(narrowest, widest),
                 ..width
@@ -198,8 +216,7 @@ impl<W: Copy + PartialEq> Strip<W> {
                     .clamp(narrowest, widest),
                 full: false,
             },
-        };
-        self.insert_column(Column { window, width });
+        }
     }
 
     /// Adds the column to the right of the focused one and focuses it.

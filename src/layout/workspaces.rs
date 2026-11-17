@@ -4,6 +4,8 @@ use super::{Direction, Mode, Options, Placement, Rect, Step, Strip, Width};
 struct Workspace<W> {
     strip: Strip<W>,
     floating: Vec<W>,
+    /// Named workspaces come from the config and stay when empty.
+    name: Option<String>,
 }
 
 impl<W: Copy + PartialEq> Workspace<W> {
@@ -11,12 +13,29 @@ impl<W: Copy + PartialEq> Workspace<W> {
         Workspace {
             strip: Strip::new(viewport, gap),
             floating: Vec::new(),
+            name: None,
         }
     }
 
     fn is_empty(&self) -> bool {
         self.strip.is_empty() && self.floating.is_empty()
     }
+}
+
+/// A window and where `Workspaces::arrange` puts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arranged<W> {
+    pub window: W,
+    pub mode: Mode,
+    /// For a tiled window, `None` for the default.
+    pub width: Option<Width>,
+    /// Counted from the top. Past the last workspace with windows means a
+    /// new one at the bottom, one for each distinct index, in order.
+    pub workspace: usize,
+    /// For a tiled window, the column it goes right of. Without one it goes
+    /// right of the window arranged before it in that workspace, or else
+    /// leftmost.
+    pub after: Option<W>,
 }
 
 /// Where a window is kept. The indices are workspaces in the stack.
@@ -30,9 +49,10 @@ enum Home {
 
 /// A stack of workspaces with one of them on screen.
 ///
-/// The bottom workspace is always empty, so there is always somewhere new to
-/// go, and any other one disappears once it's empty and left. Workspaces are
-/// never created or deleted by hand.
+/// Named workspaces sit at the top in the config's order and always stay.
+/// Below them, the bottom workspace is always empty, so there is always
+/// somewhere new to go, and any other one disappears once it's empty and
+/// left. Workspaces are never created or deleted by hand.
 ///
 /// Floating windows are tracked but never positioned: they stay wherever they
 /// are and only show or hide with their workspace.
@@ -109,6 +129,122 @@ impl<W: Copy + PartialEq> Workspaces<W> {
             workspace
                 .strip
                 .configure(viewport, gap, self.options.clone());
+        }
+    }
+
+    /// Puts the named workspaces at the top in this order, making the missing
+    /// ones empty. A workspace whose name is gone keeps its windows unnamed.
+    pub fn name(&mut self, names: &[String]) {
+        let mut old: Vec<_> = self.stack.drain(..).enumerate().collect();
+        let mut stack = Vec::with_capacity(old.len() + names.len());
+        let mut active = 0;
+        for name in names {
+            let found = old
+                .iter()
+                .position(|(_, workspace)| workspace.name.as_ref() == Some(name));
+            let (index, workspace) = match found {
+                Some(found) => old.remove(found),
+                None => (usize::MAX, self.blank(Some(name.clone()))),
+            };
+            if index == self.active {
+                active = stack.len();
+            }
+            stack.push(workspace);
+        }
+        for (index, mut workspace) in old {
+            workspace.name = None;
+            if index == self.active {
+                active = stack.len();
+            }
+            stack.push(workspace);
+        }
+        self.stack = stack;
+        self.active = active;
+        self.tidy();
+    }
+
+    /// The workspace with this name, counted from the top.
+    pub fn named(&self, name: &str) -> Option<usize> {
+        self.stack
+            .iter()
+            .position(|workspace| workspace.name.as_deref() == Some(name))
+    }
+
+    /// Each workspace's name, top to bottom.
+    pub fn names(&self) -> impl Iterator<Item = Option<&str>> {
+        self.stack.iter().map(|workspace| workspace.name.as_deref())
+    }
+
+    /// The workspace the window belongs to, unless it's on every one.
+    pub fn workspace_of(&self, window: W) -> Option<usize> {
+        match self.home(window)? {
+            Home::Tiled(index) | Home::Floating(index) => Some(index),
+            Home::Sticky | Home::OnTop => None,
+        }
+    }
+
+    /// The focused column of the workspace at `index`.
+    pub fn column_focus(&self, index: usize) -> Option<W> {
+        self.stack.get(index)?.strip.focused()
+    }
+
+    /// Moves each window to its spot, adding the ones not in the layout yet,
+    /// without changing which workspace is on screen. Focus only moves off a
+    /// window that leaves the workspace on screen.
+    pub fn arrange(&mut self, items: &[Arranged<W>]) {
+        let focused = self.focused();
+        // Indices are read against the stack as it is now; moving windows
+        // out can only empty workspaces, which go once everything is placed.
+        let bottom = self.stack.len() - 1;
+        let mut beyond: Vec<usize> = items
+            .iter()
+            .map(|item| item.workspace)
+            .filter(|index| *index >= bottom)
+            .collect();
+        beyond.sort_unstable();
+        beyond.dedup();
+        let target = |index: usize| match beyond.binary_search(&index) {
+            Ok(rank) => bottom + rank,
+            Err(_) => index,
+        };
+        while self.stack.len() < bottom + beyond.len() {
+            self.stack.push(self.blank(None));
+        }
+        for item in items {
+            self.detach(item.window);
+        }
+        let mut last: Vec<(usize, W)> = Vec::new();
+        for item in items {
+            let index = target(item.workspace);
+            match item.mode {
+                Mode::Tiled => {
+                    let previous = last
+                        .iter()
+                        .rev()
+                        .find(|(placed, _)| *placed == index)
+                        .map(|(_, window)| *window);
+                    let strip = &mut self.stack[index].strip;
+                    let column = item
+                        .after
+                        .or(previous)
+                        .and_then(|after| strip.position(after))
+                        .map_or(0, |position| position + 1);
+                    strip.put(column, item.window, item.width);
+                    last.push((index, item.window));
+                }
+                Mode::Floating => self.stack[index].floating.push(item.window),
+                Mode::Sticky => self.sticky.push(item.window),
+                Mode::OnTop => self.on_top.push(item.window),
+            }
+        }
+        self.tidy();
+        if let Some(window) = focused
+            && self.contains(window)
+            && self
+                .workspace_of(window)
+                .is_none_or(|index| index == self.active)
+        {
+            self.focus(window);
         }
     }
 
@@ -369,28 +505,34 @@ impl<W: Copy + PartialEq> Workspaces<W> {
         true
     }
 
-    /// Drops the empty workspaces nobody is looking at and makes sure the
-    /// bottom one is empty.
+    /// Drops the empty unnamed workspaces nobody is looking at and makes sure
+    /// the bottom one is empty and unnamed.
     fn tidy(&mut self) {
         let active = self.active;
+        let unused = |workspace: &Workspace<W>| workspace.is_empty() && workspace.name.is_none();
         let dropped_above = self.stack[..active]
             .iter()
-            .filter(|workspace| workspace.is_empty())
+            .filter(|workspace| unused(workspace))
             .count();
 
         let mut index = 0;
         self.stack.retain(|workspace| {
-            let keep = index == active || !workspace.is_empty();
+            let keep = index == active || !unused(workspace);
             index += 1;
             keep
         });
         self.active -= dropped_above;
 
-        if self.stack.last().is_none_or(|last| !last.is_empty()) {
-            let mut workspace = Workspace::new(self.viewport, self.gap);
-            workspace.strip.options = self.options.clone();
-            self.stack.push(workspace);
+        if self.stack.last().is_none_or(|last| !unused(last)) {
+            self.stack.push(self.blank(None));
         }
+    }
+
+    fn blank(&self, name: Option<String>) -> Workspace<W> {
+        let mut workspace = Workspace::new(self.viewport, self.gap);
+        workspace.strip.options = self.options.clone();
+        workspace.name = name;
+        workspace
     }
 }
 
@@ -616,6 +758,59 @@ mod tests {
             [vec![1, 3, 2], vec![]],
             "tiled beside the strip's focused column"
         );
+    }
+
+    fn names(workspaces: &Workspaces<u32>) -> Vec<Option<&str>> {
+        workspaces.names().collect()
+    }
+
+    #[test]
+    fn named_workspaces_stay_on_top_in_order_even_when_empty() {
+        let mut workspaces = workspaces([1]);
+        workspaces.name(&["web".into(), "chat".into()]);
+        assert_eq!(names(&workspaces), [Some("web"), Some("chat"), None, None]);
+        assert_eq!(rows(&workspaces), [vec![], vec![], vec![1], vec![]]);
+        assert_eq!(workspaces.focused(), Some(1), "still on the same workspace");
+
+        workspaces.focus_workspace(0);
+        workspaces.focus(1);
+        assert_eq!(rows(&workspaces).len(), 4, "left, but named");
+        workspaces.name(&["chat".into()]);
+        assert_eq!(names(&workspaces), [Some("chat"), None, None]);
+        assert_eq!(workspaces.named("chat"), Some(0));
+        assert_eq!(rows(&workspaces), [vec![], vec![1], vec![]]);
+    }
+
+    #[test]
+    fn arranging_places_windows_in_order_without_switching() {
+        let mut workspaces = workspaces([1, 2, 3]);
+        let tiled = |window, workspace| Arranged {
+            window,
+            mode: Mode::Tiled,
+            width: None,
+            workspace,
+            after: None,
+        };
+        // Past the end, 5 and 7 each get a new workspace, in that order.
+        workspaces.arrange(&[tiled(3, 7), tiled(2, 0), tiled(1, 0), tiled(4, 5)]);
+        assert_eq!(rows(&workspaces), [vec![2, 1], vec![4], vec![3], vec![]]);
+        assert_eq!(workspaces.active(), (0, 4));
+
+        workspaces.arrange(&[Arranged {
+            after: Some(2),
+            ..tiled(5, 0)
+        }]);
+        assert_eq!(rows(&workspaces)[0], [2, 5, 1]);
+        workspaces.arrange(&[Arranged {
+            mode: Mode::Floating,
+            ..tiled(1, 1)
+        }]);
+        assert_eq!(rows(&workspaces)[0], [2, 5]);
+        assert_eq!(workspaces.mode(1), Some(Mode::Floating));
+
+        workspaces.focus(2);
+        workspaces.arrange(&[tiled(2, 0)]);
+        assert_eq!(workspaces.focused(), Some(2), "kept by a window that stays");
     }
 
     #[test]
