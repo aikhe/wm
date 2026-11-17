@@ -25,17 +25,20 @@ use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWi
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::Shell::{
+    ABM_NEW, ABM_REMOVE, ABN_FULLSCREENAPP, APPBARDATA, SHAppBarMessage,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EVENT_OBJECT_DESTROY, EVENT_OBJECT_NAMECHANGE, FindWindowW, GetWindowTextW,
-    GetWindowThreadProcessId, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, MSG, MWMO_INPUTAVAILABLE,
-    MsgWaitForMultipleObjectsEx, OBJID_WINDOW, PM_REMOVE, PeekMessageW, PostMessageW,
-    PostQuitMessage, QS_ALLINPUT, SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW,
-    TranslateMessage, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMECHANGE, WM_TIMER, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetWindowThreadProcessId, HWND_BOTTOM, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, MSG,
+    MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, OBJID_WINDOW, PM_REMOVE, PeekMessageW,
+    PostMessageW, PostQuitMessage, QS_ALLINPUT, SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetTimer, SetWindowPos,
+    ShowWindow, SystemParametersInfoW, TranslateMessage, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMECHANGE, WM_TIMER,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Error, PCWSTR, w};
 use wm_bar_protocol::{self as protocol, BAR_CLASS, Client, Command, Snapshot};
@@ -47,6 +50,8 @@ use crate::stats::{CpuSampler, MemoryUsage};
 const TITLE_CHANGED: u32 = WM_APP + 10;
 const HOST_DIED: u32 = WM_APP + 11;
 const SYSTEM_CHANGED: u32 = WM_APP + 12;
+const APPBAR_CALLBACK: u32 = WM_APP + 13;
+const FULLSCREEN_CHANGED: u32 = WM_APP + 14;
 const CLOCK_TIMER: usize = 1;
 const RELOAD_TIMER: usize = 2;
 const CPU_TIMER: usize = 3;
@@ -78,6 +83,10 @@ unsafe extern "system" fn window_proc(
                     LPARAM(0),
                 )
             };
+            LRESULT(0)
+        }
+        APPBAR_CALLBACK if wparam.0 as u32 == ABN_FULLSCREENAPP => {
+            let _ = unsafe { PostMessageW(Some(hwnd), FULLSCREEN_CHANGED, WPARAM(0), lparam) };
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -307,9 +316,23 @@ struct Hit {
     revision: u64,
 }
 
+/// Registers or removes the bar as a shell appbar. It never reserves space
+/// (no `ABM_SETPOS`); registering only makes the shell tell the bar when a
+/// fullscreen app opens or closes.
+fn appbar(message: u32, window: HWND) {
+    let mut data = APPBARDATA {
+        cbSize: size_of::<APPBARDATA>() as u32,
+        hWnd: window,
+        uCallbackMessage: APPBAR_CALLBACK,
+        ..Default::default()
+    };
+    unsafe { SHAppBarMessage(message, &mut data) };
+}
+
 struct BarWindow(HWND);
 impl Drop for BarWindow {
     fn drop(&mut self) {
+        appbar(ABM_REMOVE, self.0);
         let _ = unsafe { DestroyWindow(self.0) };
         BAR.set(0);
     }
@@ -332,6 +355,8 @@ struct View {
     cpu: String,
     memory: String,
     hits: Vec<Hit>,
+    /// A fullscreen app is open, so the bar sits at the bottom instead of on top.
+    fullscreen: bool,
 }
 
 fn work_area() -> windows::core::Result<RECT> {
@@ -383,6 +408,7 @@ impl View {
             )?
         });
         BAR.set(window.0.0 as isize);
+        appbar(ABM_NEW, window.0);
         let mut view = Self {
             window,
             config,
@@ -400,12 +426,38 @@ impl View {
             cpu: String::new(),
             memory: String::new(),
             hits: Vec::new(),
+            fullscreen: false,
         };
         view.connect();
         view.update_clock();
         view.configure_stats();
         let _ = unsafe { ShowWindow(view.window.0, SW_SHOWNOACTIVATE) };
         Ok(view)
+    }
+
+    /// Where the bar belongs in the z-order: behind everything while a
+    /// fullscreen app is open, above everything otherwise.
+    fn layer(&self) -> HWND {
+        if self.fullscreen {
+            HWND_BOTTOM
+        } else {
+            HWND_TOPMOST
+        }
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool) {
+        self.fullscreen = fullscreen;
+        let _ = unsafe {
+            SetWindowPos(
+                self.window.0,
+                Some(self.layer()),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
     }
 
     fn invalidate(&self) {
@@ -565,7 +617,7 @@ impl View {
             unsafe {
                 SetWindowPos(
                     self.window.0,
-                    Some(HWND_TOPMOST),
+                    Some(self.layer()),
                     area.left,
                     area.top,
                     area.right - area.left,
@@ -603,7 +655,7 @@ impl View {
         unsafe {
             SetWindowPos(
                 self.window.0,
-                Some(HWND_TOPMOST),
+                Some(self.layer()),
                 area.left,
                 area.top,
                 area.right - area.left,
@@ -967,6 +1019,10 @@ pub fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Erro
                         view.update_clock();
                         continue;
                     }
+                    FULLSCREEN_CHANGED => {
+                        view.set_fullscreen(message.lParam.0 != 0);
+                        continue;
+                    }
                     SYSTEM_CHANGED => {
                         view.update_clock();
                         if let Err(error) = view.reposition() {
@@ -1049,6 +1105,7 @@ mod tests {
             cpu: "24%".into(),
             memory: "6.0/16.0 GiB".into(),
             hits: Vec::new(),
+            fullscreen: false,
         };
         view.render();
         assert_eq!(
@@ -1092,6 +1149,7 @@ mod tests {
             cpu: "24%".into(),
             memory: "6.0/16.0 GiB".into(),
             hits: Vec::new(),
+            fullscreen: false,
         };
         view.render();
         let active = view
