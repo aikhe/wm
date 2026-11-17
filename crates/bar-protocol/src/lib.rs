@@ -219,6 +219,7 @@ unsafe extern "system" fn host_proc(
 pub enum Command {
     Workspace(u32),
     Overview,
+    Agent(usize),
 }
 
 /// A hidden window on the WM thread plus a 56-byte file mapping. Exactly one
@@ -341,6 +342,7 @@ impl Host {
                     }
                 }
             }
+            COMMAND if message.lParam.0 == -1 => return Some(Command::Agent(message.wParam.0)),
             COMMAND if message.lParam.0 as u64 == self.revision => {
                 let code = message.wParam.0;
                 if code == 0 {
@@ -365,6 +367,11 @@ impl Drop for Host {
         }
         let _ = unsafe { DestroyWindow(self.window) };
     }
+}
+
+/// Post an action index without waiting for the WM to process it.
+pub fn post_agent(host: HWND, action: usize) -> Result<()> {
+    unsafe { PostMessageW(Some(host), COMMAND, WPARAM(action), LPARAM(-1)) }
 }
 
 pub struct Client {
@@ -403,6 +410,7 @@ impl Client {
         let code = match command {
             Command::Workspace(index) => index as usize + 1,
             Command::Overview => 0,
+            Command::Agent(_) => return,
         };
         let _ = unsafe {
             PostMessageW(

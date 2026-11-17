@@ -181,6 +181,7 @@ impl Manager {
                     self.perform(Action::Workspace(index as usize))
                 }
                 Some(BarCommand::Overview) => self.perform(Action::Overview),
+                Some(BarCommand::Agent(_)) => ControlFlow::Continue(()),
                 None => ControlFlow::Continue(()),
             };
         }
