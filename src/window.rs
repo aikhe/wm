@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
     SetWindowPlacement, SetWindowPos, ShowWindowAsync, WINDOW_EX_STYLE, WINDOW_STYLE,
     WINDOWPLACEMENT, WM_CLOSE, WPF_ASYNCWINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
-    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::{BOOL, PWSTR, Result};
 
@@ -390,6 +390,12 @@ impl Info {
         .into_iter()
         .find_map(|(applies, skip)| applies.then_some(skip))
     }
+
+    /// Whether it looks like a dialog, which opens floating as in niri: it
+    /// can't be resized, or it uses the standard dialog class.
+    pub fn dialog_like(&self) -> bool {
+        !self.style.contains(WS_THICKFRAME) || self.class == "#32770"
+    }
 }
 
 impl fmt::Display for Info {
@@ -474,5 +480,20 @@ mod tests {
             .skip(),
             Some(Skip::Uncaptioned)
         );
+    }
+
+    #[test]
+    fn fixed_size_and_dialog_class_windows_are_dialog_like() {
+        let resizable = Info {
+            style: WS_CAPTION | WS_THICKFRAME,
+            ..app()
+        };
+        assert!(!resizable.dialog_like());
+        assert!(app().dialog_like(), "no resize border");
+        let dialog = Info {
+            class: "#32770".into(),
+            ..resizable
+        };
+        assert!(dialog.dialog_like());
     }
 }

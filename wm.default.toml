@@ -33,6 +33,9 @@ wrap_move = true
 # Turning either off also stops using its learned values; it does not erase them.
 remember_modes = true
 remember_widths = true
+# Open dialog-like windows floating, as niri does: ones that can't be resized,
+# or use the standard dialog class. Rules and learned modes still win.
+float_dialogs = true
 # Raise floating windows above tiled windows when a tiled window takes focus.
 floating_above_tiled = true
 # Print window events and hotkey actions to the console. Errors always print.

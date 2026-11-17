@@ -532,8 +532,19 @@ impl Manager {
             return;
         };
         let width = self.layout.width(window);
-        let rule = self.rules.get(window);
-        self.rules.set(window, Rule { width, ..rule });
+        let opening = self.opening_mode(window);
+        let rule = self.rules.get(window, opening);
+        self.rules.set(window, Rule { width, ..rule }, opening);
+    }
+
+    /// The mode a window opens in when no rule says otherwise: floating if
+    /// it looks like a dialog, as in niri, or else tiled.
+    fn opening_mode(&self, window: Window) -> Mode {
+        if self.config.behavior.float_dialogs && window.info().dialog_like() {
+            Mode::Floating
+        } else {
+            Mode::Tiled
+        }
     }
 
     /// Gives keyboard focus to the layout's focused window, or to the desktop
@@ -622,13 +633,15 @@ impl Manager {
             return false;
         };
         let after = before.toggled(target);
+        let opening = self.opening_mode(window);
+        let previous = self.rules.get(window, opening);
         // Its own width while it's tiled, or else the one its kind last had.
         let width = self.layout.width(window);
         let width = width.or_else(|| {
             self.config
                 .behavior
                 .remember_widths
-                .then(|| self.rules.get(window).width)
+                .then_some(previous.width)
                 .flatten()
         });
         self.layout.set_mode(window, after, width);
@@ -646,7 +659,6 @@ impl Manager {
         if (before == Mode::OnTop) != (after == Mode::OnTop) {
             window.set_topmost(after == Mode::OnTop);
         }
-        let previous = self.rules.get(window);
         self.rules.set(
             window,
             Rule {
@@ -661,6 +673,7 @@ impl Manager {
                     previous.width
                 },
             },
+            opening,
         );
         true
     }
@@ -668,11 +681,13 @@ impl Manager {
     /// Takes the window into the layout, in the mode and at the width its
     /// kind was last given.
     fn adopt(&mut self, window: Window) -> bool {
+        let opening = self.opening_mode(window);
         let Some(Rule { mode, width }) = self.config.resolve_rule(
             &window.exe().unwrap_or_default(),
             &window.class(),
             &window.title(),
-            self.rules.get(window),
+            self.rules.get(window, opening),
+            opening,
             self.layout.default_width(),
         ) else {
             return false;

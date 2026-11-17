@@ -127,6 +127,7 @@ fn list() -> Result<()> {
         let info = window.info();
         let exe = window.exe().unwrap_or_else(|| "?".into());
         match window.skip(&info) {
+            None if info.dialog_like() => println!("float {exe:<22} {info}"),
             None => println!("tile  {exe:<22} {info}"),
             Some(reason) => println!("skip  {exe:<22} {info}  [{reason:?}]"),
         }

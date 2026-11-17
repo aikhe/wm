@@ -81,6 +81,7 @@ pub struct Behavior {
     pub wrap_move: bool,
     pub remember_modes: bool,
     pub remember_widths: bool,
+    pub float_dialogs: bool,
     pub floating_above_tiled: bool,
     pub log_events: bool,
 }
@@ -92,6 +93,7 @@ impl Default for Behavior {
             wrap_move: true,
             remember_modes: true,
             remember_widths: true,
+            float_dialogs: true,
             floating_above_tiled: true,
             log_events: true,
         }
@@ -328,10 +330,11 @@ impl Config {
         class: &str,
         title: &str,
         mut learned: Rule,
+        opening: Mode,
         default_pixels: i32,
     ) -> Option<Rule> {
         if !self.behavior.remember_modes {
-            learned.mode = Mode::Tiled;
+            learned.mode = opening;
         }
         if !self.behavior.remember_widths {
             learned.width = None;
@@ -545,26 +548,27 @@ mod tests {
             }),
         };
         let matched = config
-            .resolve_rule("A.exe", "A", "title", learned, 500)
+            .resolve_rule("A.exe", "A", "title", learned, Mode::Tiled, 500)
             .unwrap();
         assert_eq!(matched.mode, Mode::Floating);
         assert_eq!(matched.width, learned.width);
         assert!(
             config
-                .resolve_rule("a.exe", "B", "title", learned, 500)
+                .resolve_rule("a.exe", "B", "title", learned, Mode::Tiled, 500)
                 .is_none()
         );
         assert_eq!(
-            config.resolve_rule("b.exe", "A", "title", learned, 500),
+            config.resolve_rule("b.exe", "A", "title", learned, Mode::Tiled, 500),
             Some(learned)
         );
         let off = Config::parse("[behavior]\nremember_modes=false\nremember_widths=false").unwrap();
         assert_eq!(
-            off.resolve_rule("b.exe", "A", "title", learned, 500),
+            off.resolve_rule("b.exe", "A", "title", learned, Mode::Floating, 500),
             Some(Rule {
-                mode: Mode::Tiled,
+                mode: Mode::Floating,
                 width: None
-            })
+            }),
+            "falls back to the window's default mode"
         );
     }
 }

@@ -4,8 +4,8 @@
 //!
 //! The rules live in `%APPDATA%\wm\rules.txt`, one per line, with tabs
 //! between the mode, the program's file name, the window class and, when one
-//! was set, the column width in pixels and then `full`. A kind that is tiled
-//! at the default width needs no rule.
+//! was set, the column width in pixels and then `full`. A kind that opens in
+//! its default mode at the default width needs no rule.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,11 +25,6 @@ pub struct Rule {
     /// the default.
     pub width: Option<Width>,
 }
-
-const DEFAULT: Rule = Rule {
-    mode: Mode::Tiled,
-    width: None,
-};
 
 const MODES: [(Mode, &str); 4] = [
     (Mode::Tiled, "tiled"),
@@ -60,25 +55,33 @@ impl Rules {
         }
     }
 
-    /// The rule for windows of this one's kind: tiled at the default width
-    /// unless something else was set.
-    pub fn get(&self, window: Window) -> Rule {
+    /// The rule for windows of this one's kind: its default mode, `opening`,
+    /// at the default width unless something else was set.
+    pub fn get(&self, window: Window, opening: Mode) -> Rule {
         let rule = kind(window).and_then(|kind| self.rules.get(&kind).copied());
-        rule.unwrap_or(DEFAULT)
+        rule.unwrap_or(Rule {
+            mode: opening,
+            width: None,
+        })
     }
 
-    /// Sets the rule for windows of this one's kind. Nothing is written
-    /// until `save`, so that no key press ever waits on the disk.
-    pub fn set(&mut self, window: Window, rule: Rule) {
+    /// Sets the rule for windows of this one's kind, whose default mode is
+    /// `opening`. Nothing is written until `save`, so that no key press ever
+    /// waits on the disk.
+    pub fn set(&mut self, window: Window, rule: Rule, opening: Mode) {
         let Some(kind) = kind(window) else {
             return;
         };
-        let old = if rule == DEFAULT {
+        let default = Rule {
+            mode: opening,
+            width: None,
+        };
+        let old = if rule == default {
             self.rules.remove(&kind)
         } else {
             self.rules.insert(kind, rule)
         };
-        self.unsaved |= old.unwrap_or(DEFAULT) != rule;
+        self.unsaved |= old.unwrap_or(default) != rule;
     }
 
     /// Writes the rules to the file if they have changed.
