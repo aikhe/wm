@@ -45,8 +45,16 @@ cargo run -- config path        # Print the config location
 cargo run -- config defaults    # Print the full commented template
 cargo run -- --config C:\path\config.toml  # Use a different file
 cargo run -- list               # Inspect eligible/skipped windows
+cargo run -- do focus_right     # Post an action to the running WM
 cargo test
 ```
+
+`wm do ACTION` posts a named action to the running WM and returns without
+waiting for it to run. The `[agent] allow` list controls which actions the WM
+accepts; it defaults to every action except `close` and `quit` and reloads on
+save. Add those names explicitly to allow them. Invalid or repeated names reject
+the configuration. Refused actions are logged. Hotkeys and bar commands are
+unaffected. The list of action names is in `[hotkeys]` in the config template.
 
 Alt+Shift+R manually retries a reload (useful after resolving a hotkey conflict).
 The config lists all other default keys; Alt+Shift+E or Ctrl+C quits and restores

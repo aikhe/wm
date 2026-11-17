@@ -112,6 +112,10 @@ Don't use GlazeWM as a reference; Ike finds it too slow.
   registering keys or moving windows; key availability is checked on apply.
   `config path` prints the path; `config defaults` prints the commented template.
   `--config PATH` selects another file for either commands or the manager.
+- `wm do ACTION` posts a named hotkey action to the running WM without waiting
+  for it to run. `[agent] allow` lists permitted names and reloads on save;
+  all actions except `close` and `quit` are allowed by default. Refusals are
+  logged by the WM. Hotkeys and bar commands do not use this list.
 - Layout geometry, navigation, hotkeys and overview appearance update live.
   Existing workspaces/focus/modes and widths survive reloads; widths are only
   clamped if new layout limits require it. New default widths and explicit
