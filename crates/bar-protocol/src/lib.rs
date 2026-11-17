@@ -493,6 +493,9 @@ mod tests {
         assert_eq!(host.handle(&message), None, "index is now out of range");
         message.wParam = WPARAM(0);
         assert_eq!(host.handle(&message), Some(Command::Overview));
+        message.wParam = WPARAM(31);
+        message.lParam = LPARAM(-1);
+        assert_eq!(host.handle(&message), Some(Command::Agent(31)));
 
         // A stalled bar gets one notification, regardless of how often the
         // WM changes. ACKing an old revision delivers the latest state next.

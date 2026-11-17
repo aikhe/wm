@@ -50,7 +50,7 @@ fn execute() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
     {
         println!(
-            "wm [--config PATH]      Tile; config is created if missing and reloads on save.\nwm list                Inspect windows without rearranging them.\nwm config init         Create the commented defaults without overwriting a file.\nwm config check        Validate the file and monitor geometry without tiling.\nwm config path         Print its absolute path.\nwm config defaults     Print all commented defaults.\nAll config commands accept --config PATH."
+            "wm [--config PATH]      Tile; config is created if missing and reloads on save.\nwm list                Inspect windows without rearranging them.\nwm do ACTION           Post an allowed action to the running WM.\nwm config init         Create the commented defaults without overwriting a file.\nwm config check        Validate the file and monitor geometry without tiling.\nwm config path         Print its absolute path.\nwm config defaults     Print all commented defaults.\nAll config commands accept --config PATH."
         );
         return Ok(());
     }
@@ -89,6 +89,23 @@ fn execute() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
             _ => return Err("use wm config init|check|path|defaults [--config PATH]".into()),
         }
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| arg == "do") {
+        if args.len() != 2 || chosen_path.is_some() {
+            return Err("use wm do ACTION".into());
+        }
+        let index = bindings::action_index(&args[1]).ok_or_else(|| {
+            let names = bindings::DEFAULTS
+                .iter()
+                .map(|(name, _, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("unknown action `{}`; valid actions: {names}", args[1])
+        })?;
+        let host = wm_bar_protocol::find_host().ok_or("wm is not running")?;
+        wm_bar_protocol::post_agent(host, index)
+            .map_err(|error| format!("could not post action to wm: {error}"))?;
         return Ok(());
     }
     // Without this, coordinates are scaled on monitors that aren't at 100%.

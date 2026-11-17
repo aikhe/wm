@@ -181,7 +181,21 @@ impl Manager {
                     self.perform(Action::Workspace(index as usize))
                 }
                 Some(BarCommand::Overview) => self.perform(Action::Overview),
-                Some(BarCommand::Agent(_)) => ControlFlow::Continue(()),
+                Some(BarCommand::Agent(index)) => {
+                    if let Some((name, _, action)) = crate::bindings::DEFAULTS.get(index) {
+                        if !self.config.agent_allow.contains(action) {
+                            self.log_always(&format!("Agent refused {name}"));
+                            ControlFlow::Continue(())
+                        } else if *action == Action::Reload {
+                            watcher.reload();
+                            ControlFlow::Continue(())
+                        } else {
+                            self.perform(*action)
+                        }
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                }
                 None => ControlFlow::Continue(()),
             };
         }
@@ -482,6 +496,10 @@ impl Manager {
         if !self.config.behavior.log_events {
             return;
         }
+        self.log_always(event);
+    }
+
+    fn log_always(&self, event: &str) {
         let (active, count) = self.layout.active();
         let workspace = active + 1;
         let Some(window) = self.layout.focused() else {

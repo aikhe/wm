@@ -69,6 +69,10 @@ pub const DEFAULTS: [(&str, &str, Action); 37] = [
     ("reload", "Alt+Shift+R", Action::Reload),
 ];
 
+pub fn action_index(name: &str) -> Option<usize> {
+    DEFAULTS.iter().position(|(known, _, _)| *known == name)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Chord {
     pub modifiers: u32,
@@ -272,6 +276,15 @@ impl Drop for Hotkeys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_names_round_trip() {
+        for (index, (name, _, action)) in DEFAULTS.iter().enumerate() {
+            assert_eq!(action_index(name), Some(index));
+            assert_eq!(DEFAULTS[action_index(name).unwrap()].2, *action);
+        }
+        assert_eq!(action_index("unknown"), None);
+    }
 
     #[test]
     fn aliases_and_case_cannot_hide_duplicate_bindings() {

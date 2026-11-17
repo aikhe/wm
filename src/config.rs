@@ -8,7 +8,7 @@ use serde::Deserialize;
 use windows::Win32::Foundation::COLORREF;
 
 use crate::animation::Animations;
-use crate::bindings::{self, Binding};
+use crate::bindings::{self, Action, Binding};
 use crate::layout::{Fraction, Mode, Options, Rect, Width};
 use crate::rules::Rule;
 
@@ -22,7 +22,26 @@ struct Document {
     overview: Overview,
     animations: Animations,
     hotkeys: BTreeMap<String, String>,
+    agent: Agent,
     window_rules: Vec<WindowRule>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Agent {
+    allow: Vec<String>,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Self {
+            allow: bindings::DEFAULTS
+                .iter()
+                .filter(|(_, _, action)| !matches!(action, Action::Close | Action::Quit))
+                .map(|(name, _, _)| (*name).to_string())
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,6 +177,7 @@ pub struct Config {
     pub options: Options,
     pub style: OverviewStyle,
     pub bindings: Vec<Binding>,
+    pub agent_allow: Vec<Action>,
     window_rules: Vec<WindowRule>,
 }
 
@@ -171,6 +191,7 @@ impl Config {
             overview,
             animations,
             hotkeys,
+            agent,
             window_rules,
         } = document;
         animations.validate()?;
@@ -256,6 +277,16 @@ impl Config {
             }
         }
         let bindings = bindings::compile(&hotkeys)?;
+        let mut agent_allow = Vec::new();
+        for name in agent.allow {
+            let index = bindings::action_index(&name)
+                .ok_or_else(|| format!("unknown agent.allow action `{name}`"))?;
+            let action = bindings::DEFAULTS[index].2;
+            if agent_allow.contains(&action) {
+                return Err(format!("duplicate agent.allow action `{name}`"));
+            }
+            agent_allow.push(action);
+        }
         Ok(Self {
             layout,
             behavior,
@@ -264,6 +295,7 @@ impl Config {
             options,
             style,
             bindings,
+            agent_allow,
             window_rules,
         })
     }
@@ -410,6 +442,7 @@ mod tests {
         let example = Config::parse(DEFAULT_CONFIG).unwrap();
         let empty = Config::parse("").unwrap();
         assert_eq!(example.bindings, empty.bindings);
+        assert_eq!(example.agent_allow, empty.agent_allow);
         assert_eq!(example.options, empty.options);
         assert_eq!(example.style, empty.style);
         assert_eq!(example.animations, empty.animations);
@@ -462,6 +495,22 @@ mod tests {
                     height: 600
                 })
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn agent_allow_list_defaults_and_validation() {
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.agent_allow.len(), bindings::DEFAULTS.len() - 2);
+        assert!(!default.agent_allow.contains(&Action::Close));
+        assert!(!default.agent_allow.contains(&Action::Quit));
+        assert!(Config::parse("[agent]\nallow=['unknown']").is_err());
+        assert!(Config::parse("[agent]\nallow=['close', 'close']").is_err());
+        assert_eq!(
+            Config::parse("[agent]\nallow=['close']")
+                .unwrap()
+                .agent_allow,
+            vec![Action::Close]
         );
     }
 

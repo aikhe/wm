@@ -38,6 +38,20 @@ floating_above_tiled = true
 # Print window events and hotkey actions to the console. Errors always print.
 log_events = true
 
+[agent]
+# Actions accepted from `wm do`. Hotkeys and bar commands are unaffected.
+# Unknown or repeated names reject the whole configuration. Close and quit
+# can be added explicitly; the running WM checks this list on every request.
+allow = [
+    "focus_left", "focus_right", "focus_up", "focus_down",
+    "move_left", "move_right", "move_up", "move_down",
+    "workspace_1", "workspace_2", "workspace_3", "workspace_4", "workspace_5",
+    "workspace_6", "workspace_7", "workspace_8", "workspace_9",
+    "send_1", "send_2", "send_3", "send_4", "send_5", "send_6", "send_7", "send_8", "send_9",
+    "cycle_width", "resize_narrower", "resize_wider", "toggle_full",
+    "toggle_float", "toggle_sticky", "toggle_top", "overview", "reload",
+]
+
 [animations]
 # Presentation only: keyboard focus and window placement never wait for it.
 # Windows move on springs, as in niri: they ease in and out, and a key pressed
