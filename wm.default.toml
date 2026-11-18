@@ -5,6 +5,11 @@
 # Pixels are physical screen pixels. No restart or rebuild is needed.
 # Use `wm config check` to validate without rearranging the desktop.
 
+# Named workspaces, top to bottom. They stay even when empty, so window rules
+# and setups can send windows to them, e.g. ["web", "chat", "code"]. Alt+1..9
+# still count from the top. Unnamed workspaces below them come and go as usual.
+workspaces = []
+
 [layout]
 # Gap between columns AND around the outside of the tiled area, in pixels.
 gap = 8
@@ -40,6 +45,8 @@ float_dialogs = true
 floating_above_tiled = true
 # Print window events and hotkey actions to the console. Errors always print.
 log_events = true
+# The setup (see [setups] below) to load when wm starts, or "" for none.
+startup_setup = ""
 
 [agent]
 # Actions accepted from `wm do`. Hotkeys and bar commands are unaffected.
@@ -159,6 +166,9 @@ reload = "Alt+Shift+R"
 # fall back to remembered values (if enabled), then the layout defaults.
 # mode: "tiled", "float", "sticky", "top", or "ignore" (leave the window alone).
 # width: column width in pixels, clamped to layout limits. full_width: bool.
+# workspace: a name from `workspaces`, or a number from 1 at the top; past the
+# last one opens a new workspace. focus: false places the window there without
+# switching the view or giving it the keyboard (default true).
 # Explicit rules are never rewritten by wm. Keyboard changes still work for the
 # current window; the explicit rule takes priority the next time one joins.
 #
@@ -173,3 +183,35 @@ reload = "Alt+Shift+R"
 # exe = "example.exe"
 # title_contains = "Settings"
 # mode = "ignore"
+#
+# [[window_rules]]
+# exe = "Discord.exe"
+# workspace = "chat"
+# focus = false
+
+# Setups: none by default. A setup is a list of apps, each with the workspace,
+# mode and width it belongs at. Its key loads it: open windows of its apps
+# move into place, left to right in list order, and apps without a window are
+# launched and placed as their windows appear, without taking focus. Other
+# windows stay where they are.
+# key / save_key: hotkeys, one string or a list, like [hotkeys].
+# apps: each takes exe, class and title_contains to match windows (as in
+# window_rules), run (a path, a program name, a shortcut or a URL; exe
+# defaults to its file name) and args to launch it, and workspace, mode, width
+# and full_width as in window_rules. Without workspace it goes to the one on
+# screen; without mode or width it keeps what it has.
+# A setup without apps keeps them in setups.toml beside this file, which its
+# save_key rewrites from the layout as it is: every window, its workspace,
+# column order, mode and width. save_key needs a setup without apps here.
+#
+# [setups.work]
+# key = "Ctrl+Alt+1"
+# apps = [
+#     { run = "firefox.exe", workspace = "web", width = 1264 },
+#     { run = "wezterm-gui.exe", workspace = "code" },
+#     { exe = "Discord.exe", run = "C:/Users/me/AppData/Local/Discord/Update.exe", args = "--processStart Discord.exe", workspace = "chat" },
+# ]
+#
+# [setups.saved]
+# key = "Ctrl+Alt+2"
+# save_key = "Ctrl+Alt+Shift+2"

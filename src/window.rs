@@ -131,6 +131,11 @@ impl Window {
 
     /// The file name of the owning process, or `None` if it can't be opened.
     pub fn exe(self) -> Option<String> {
+        Some(self.exe_path()?.file_name()?.to_string_lossy().into_owned())
+    }
+
+    /// The full path of the owning process's program.
+    pub fn exe_path(self) -> Option<PathBuf> {
         let mut process_id = 0;
         unsafe { GetWindowThreadProcessId(self.0, Some(&mut process_id)) };
         let process =
@@ -150,8 +155,7 @@ impl Window {
         let _ = unsafe { CloseHandle(process) };
         read.ok()?;
 
-        let path = PathBuf::from(OsString::from_wide(&buffer[..len as usize]));
-        Some(path.file_name()?.to_string_lossy().into_owned())
+        Some(PathBuf::from(OsString::from_wide(&buffer[..len as usize])))
     }
 
     /// Moves the window so its visible frame fills `rect`.

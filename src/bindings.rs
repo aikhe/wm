@@ -24,6 +24,9 @@ pub enum Action {
     Close,
     Quit,
     Reload,
+    /// Index into the config's setups.
+    LoadSetup(usize),
+    SaveSetup(usize),
 }
 
 pub const DEFAULTS: [(&str, &str, Action); 37] = [
@@ -188,8 +191,8 @@ pub struct Binding {
     pub name: String,
 }
 
-/// `extra` binds keys set outside `[hotkeys]`, each with the label its
-/// errors name.
+/// `extra` binds keys set outside `[hotkeys]`, such as a setup's, each with
+/// the label its errors name.
 pub fn compile(
     overrides: &BTreeMap<String, Keys>,
     extra: &[(String, Keys, Action)],

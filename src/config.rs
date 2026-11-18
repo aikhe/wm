@@ -11,12 +11,14 @@ use crate::animation::Animations;
 use crate::bindings::{self, Action, Binding, Keys};
 use crate::layout::{Fraction, Mode, Options, Rect, Width};
 use crate::rules::Rule;
+use crate::setups::{self, App, Setup, Spot};
 
 pub const DEFAULT_CONFIG: &str = include_str!("../wm.default.toml");
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Document {
+    workspaces: Vec<String>,
     layout: Layout,
     behavior: Behavior,
     overview: Overview,
@@ -24,6 +26,16 @@ struct Document {
     hotkeys: BTreeMap<String, Keys>,
     agent: Agent,
     window_rules: Vec<WindowRule>,
+    setups: BTreeMap<String, SetupDocument>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupDocument {
+    key: Option<Keys>,
+    save_key: Option<Keys>,
+    /// Without these, the apps come from setups.toml.
+    apps: Option<Vec<App>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +96,7 @@ pub struct Behavior {
     pub float_dialogs: bool,
     pub floating_above_tiled: bool,
     pub log_events: bool,
+    startup_setup: String,
 }
 
 impl Default for Behavior {
@@ -96,6 +109,7 @@ impl Default for Behavior {
             float_dialogs: true,
             floating_above_tiled: true,
             log_events: true,
+            startup_setup: String::new(),
         }
     }
 }
@@ -158,11 +172,13 @@ struct WindowRule {
     mode: Option<RuleMode>,
     width: Option<i32>,
     full_width: Option<bool>,
+    workspace: Option<Spot>,
+    focus: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum RuleMode {
+pub enum RuleMode {
     Tiled,
     Float,
     Sticky,
@@ -170,8 +186,19 @@ enum RuleMode {
     Ignore,
 }
 
+/// How a window joins the layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Joining {
+    pub rule: Rule,
+    /// `None` for the workspace on screen.
+    pub workspace: Option<Spot>,
+    /// Whether the view follows it there and it keeps the keyboard.
+    pub focus: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub workspaces: Vec<String>,
     pub layout: Layout,
     pub behavior: Behavior,
     pub overview: Overview,
@@ -180,14 +207,28 @@ pub struct Config {
     pub style: OverviewStyle,
     pub bindings: Vec<Binding>,
     pub agent_allow: Vec<Action>,
+    pub setups: Vec<Setup>,
+    pub startup_setup: Option<usize>,
     window_rules: Vec<WindowRule>,
 }
 
 impl Config {
+    /// Without any saved setups. See `parse_with`.
+    #[cfg(test)]
     pub fn parse(text: &str) -> Result<Self, String> {
+        Self::parse_with(text, "")
+    }
+
+    /// `saved` is setups.toml, which holds the apps of setups that don't
+    /// list them in the config.
+    pub fn parse_with(text: &str, saved: &str) -> Result<Self, String> {
         let document: Document = toml::from_str(text.trim_start_matches('\u{feff}'))
             .map_err(|error| error.to_string())?;
+        let saved: BTreeMap<String, Vec<App>> =
+            toml::from_str(saved.trim_start_matches('\u{feff}'))
+                .map_err(|error| format!("setups.toml: {error}"))?;
         let Document {
+            workspaces,
             layout,
             behavior,
             overview,
@@ -195,7 +236,13 @@ impl Config {
             hotkeys,
             agent,
             window_rules,
+            setups: setup_documents,
         } = document;
+        for (index, name) in workspaces.iter().enumerate() {
+            if name.trim().is_empty() || workspaces[..index].contains(name) {
+                return Err(format!("workspaces: `{name}` must be nonempty and unique"));
+            }
+        }
         animations.validate()?;
         range("layout.gap", layout.gap, 0, 10_000)?;
         range("layout.min_width_percent", layout.min_width_percent, 1, 90)?;
@@ -262,23 +309,76 @@ impl Config {
                     "window_rules[{index}] needs nonempty match conditions"
                 ));
             }
-            if rule.mode.is_none() && rule.width.is_none() && rule.full_width.is_none() {
+            let placing = rule.workspace.is_some() || rule.focus.is_some();
+            if rule.mode.is_none() && rule.width.is_none() && rule.full_width.is_none() && !placing
+            {
                 return Err(format!(
-                    "window_rules[{index}] needs a mode, width, or full_width"
+                    "window_rules[{index}] needs a mode, width, full_width, workspace, or focus"
                 ));
             }
             if let Some(width) = rule.width {
                 range(&format!("window_rules[{index}].width"), width, 1, 100_000)?;
             }
             if matches!(rule.mode, Some(RuleMode::Ignore))
-                && (rule.width.is_some() || rule.full_width.is_some())
+                && (rule.width.is_some() || rule.full_width.is_some() || placing)
             {
                 return Err(format!(
-                    "window_rules[{index}]: ignore cannot specify a width"
+                    "window_rules[{index}]: ignore cannot specify a width, workspace, or focus"
                 ));
             }
+            if let Some(spot) = &rule.workspace {
+                let app = App {
+                    exe: "-".into(),
+                    workspace: Some(spot.clone()),
+                    ..App::default()
+                };
+                app.check(Some(&workspaces))
+                    .map_err(|error| format!("window_rules[{index}]: {error}"))?;
+            }
         }
-        let bindings = bindings::compile(&hotkeys, &[])?;
+        let mut setups = Vec::new();
+        let mut setup_keys = Vec::new();
+        for (index, (name, document)) in setup_documents.into_iter().enumerate() {
+            let label = format!("setups.{name}");
+            if document.apps.is_some() && document.save_key.is_some() {
+                return Err(format!(
+                    "{label}: save_key needs the apps to live in setups.toml; remove apps"
+                ));
+            }
+            let (apps, names) = match document.apps {
+                Some(apps) => (apps, Some(workspaces.as_slice())),
+                None => (saved.get(&name).cloned().unwrap_or_default(), None),
+            };
+            let apps = apps
+                .into_iter()
+                .enumerate()
+                .map(|(number, app)| {
+                    app.check(names)
+                        .map_err(|error| format!("{label}.apps[{number}]: {error}"))
+                })
+                .collect::<Result<_, _>>()?;
+            if let Some(keys) = document.key {
+                setup_keys.push((format!("{label}.key"), keys, Action::LoadSetup(index)));
+            }
+            if let Some(keys) = document.save_key {
+                setup_keys.push((format!("{label}.save_key"), keys, Action::SaveSetup(index)));
+            }
+            setups.push(Setup {
+                saved: names.is_none(),
+                name,
+                apps,
+            });
+        }
+        let startup_setup = match behavior.startup_setup.as_str() {
+            "" => None,
+            name => Some(
+                setups
+                    .iter()
+                    .position(|setup| setup.name == name)
+                    .ok_or_else(|| format!("behavior.startup_setup: unknown setup `{name}`"))?,
+            ),
+        };
+        let bindings = bindings::compile(&hotkeys, &setup_keys)?;
         let mut agent_allow = Vec::new();
         for name in agent.allow {
             let index = bindings::action_index(&name)
@@ -290,6 +390,7 @@ impl Config {
             agent_allow.push(action);
         }
         Ok(Self {
+            workspaces,
             layout,
             behavior,
             overview,
@@ -298,6 +399,8 @@ impl Config {
             style,
             bindings,
             agent_allow,
+            setups,
+            startup_setup,
             window_rules,
         })
     }
@@ -332,7 +435,7 @@ impl Config {
         mut learned: Rule,
         opening: Mode,
         default_pixels: i32,
-    ) -> Option<Rule> {
+    ) -> Option<Joining> {
         if !self.behavior.remember_modes {
             learned.mode = opening;
         }
@@ -349,16 +452,14 @@ impl Config {
                     .as_ref()
                     .is_none_or(|part| title.contains(part))
         }) else {
-            return Some(learned);
+            return Some(Joining {
+                rule: learned,
+                workspace: None,
+                focus: true,
+            });
         };
         if let Some(mode) = rule.mode {
-            learned.mode = match mode {
-                RuleMode::Tiled => Mode::Tiled,
-                RuleMode::Float => Mode::Floating,
-                RuleMode::Sticky => Mode::Sticky,
-                RuleMode::Top => Mode::OnTop,
-                RuleMode::Ignore => return None,
-            };
+            learned.mode = mode.mode()?;
         }
         if rule.width.is_some() || rule.full_width.is_some() {
             let before = learned.width.unwrap_or(Width {
@@ -370,7 +471,11 @@ impl Config {
                 full: rule.full_width.unwrap_or(before.full),
             });
         }
-        Some(learned)
+        Some(Joining {
+            rule: learned,
+            workspace: rule.workspace.clone(),
+            focus: rule.focus.unwrap_or(true),
+        })
     }
 }
 
@@ -434,6 +539,16 @@ pub fn init(path: &Path) -> Result<bool, String> {
 
 pub fn read(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// The config and setups.toml beside it, which may not exist yet.
+pub fn read_all(path: &Path) -> Result<(String, String), String> {
+    let saved = setups::path(path);
+    let setups = match fs::read_to_string(&saved) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        other => other.map_err(|error| format!("{}: {error}", saved.display()))?,
+    };
+    Ok((read(path)?, setups))
 }
 
 #[cfg(test)]
@@ -553,7 +668,8 @@ mod tests {
         };
         let matched = config
             .resolve_rule("A.exe", "A", "title", learned, Mode::Tiled, 500)
-            .unwrap();
+            .unwrap()
+            .rule;
         assert_eq!(matched.mode, Mode::Floating);
         assert_eq!(matched.width, learned.width);
         assert!(
@@ -562,17 +678,114 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            config.resolve_rule("b.exe", "A", "title", learned, Mode::Tiled, 500),
+            config
+                .resolve_rule("b.exe", "A", "title", learned, Mode::Tiled, 500)
+                .map(|joining| joining.rule),
             Some(learned)
         );
         let off = Config::parse("[behavior]\nremember_modes=false\nremember_widths=false").unwrap();
         assert_eq!(
-            off.resolve_rule("b.exe", "A", "title", learned, Mode::Floating, 500),
+            off.resolve_rule("b.exe", "A", "title", learned, Mode::Floating, 500)
+                .map(|joining| joining.rule),
             Some(Rule {
                 mode: Mode::Floating,
                 width: None
             }),
             "falls back to the window's default mode"
         );
+    }
+
+    #[test]
+    fn rules_place_windows_on_named_workspaces() {
+        let text = "workspaces=['web','chat']
+[[window_rules]]
+exe='discord.exe'
+workspace='chat'
+focus=false";
+        let config = Config::parse(text).unwrap();
+        let joining = config
+            .resolve_rule(
+                "Discord.exe",
+                "C",
+                "t",
+                Rule {
+                    mode: Mode::Tiled,
+                    width: None,
+                },
+                Mode::Tiled,
+                500,
+            )
+            .unwrap();
+        assert_eq!(joining.workspace, Some(Spot::Name("chat".into())));
+        assert!(!joining.focus);
+        for text in [
+            "workspaces=['web','web']",
+            "[[window_rules]]
+exe='a.exe'
+workspace='nowhere'",
+            "[[window_rules]]
+exe='a.exe'
+workspace=0",
+            "[[window_rules]]
+exe='a.exe'
+mode='ignore'
+workspace=2",
+        ] {
+            assert!(Config::parse(text).is_err(), "accepted {text}");
+        }
+    }
+
+    #[test]
+    fn setups_bind_keys_and_take_saved_apps_only_without_their_own() {
+        let text = "workspaces=['web']
+[behavior]
+startup_setup='saved'
+            [setups.saved]
+key='Ctrl+Alt+1'
+save_key=['Ctrl+Alt+Shift+1']
+            [setups.written]
+key='Ctrl+Alt+2'
+apps=[{run='C:/x/firefox.exe', workspace='web'}]";
+        let saved = "[[saved]]
+exe='a.exe'
+workspace='gone'
+[[written]]
+exe='ignored.exe'";
+        let config = Config::parse_with(text, saved).unwrap();
+        let [first, second] = &config.setups[..] else {
+            panic!("two setups");
+        };
+        assert!(first.saved && !second.saved);
+        assert_eq!(
+            first.apps[0].exe, "a.exe",
+            "saved names are checked on load"
+        );
+        assert_eq!(second.apps[0].exe, "firefox.exe");
+        assert_eq!(config.startup_setup, Some(0));
+        let actions: Vec<_> = config
+            .bindings
+            .iter()
+            .map(|binding| binding.action)
+            .collect();
+        for action in [
+            Action::LoadSetup(0),
+            Action::SaveSetup(0),
+            Action::LoadSetup(1),
+        ] {
+            assert!(actions.contains(&action));
+        }
+        for text in [
+            "[setups.a]
+save_key='Ctrl+Alt+1'
+apps=[]",
+            "[setups.a]
+key='Alt+H'",
+            "[setups.a]
+apps=[{workspace='web'}]",
+            "[behavior]
+startup_setup='missing'",
+        ] {
+            assert!(Config::parse(text).is_err(), "accepted {text}");
+        }
     }
 }

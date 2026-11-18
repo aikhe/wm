@@ -11,6 +11,7 @@ mod layout;
 mod manager;
 mod overview;
 mod rules;
+mod setups;
 mod stage;
 mod thumbnail;
 mod window;
@@ -75,7 +76,8 @@ fn execute() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 );
             }
             Some("check") if args.len() == 2 => {
-                let parsed = config::Config::parse(&config::read(&path)?)
+                let (text, saved) = config::read_all(&path)?;
+                let parsed = config::Config::parse_with(&text, &saved)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 unsafe {
                     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?

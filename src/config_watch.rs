@@ -69,7 +69,11 @@ pub struct Watcher {
 impl Watcher {
     /// Arm the directory before spawning; the worker's initial comparison
     /// catches a save between the caller's first read and this registration.
-    pub fn new(path: PathBuf, initial: String, thread: Option<u32>) -> Result<Self, String> {
+    pub fn new(
+        path: PathBuf,
+        initial: (String, String),
+        thread: Option<u32>,
+    ) -> Result<Self, String> {
         let parent = path
             .parent()
             .ok_or("configuration has no parent directory")?;
@@ -109,7 +113,7 @@ impl Watcher {
                     }
                     true
                 };
-                let mut last: Result<String, String> = Ok(initial);
+                let mut last: Result<(String, String), String> = Ok(initial);
                 let mut pending = true;
                 let mut force = false;
                 let mut retries = 0;
@@ -147,7 +151,7 @@ impl Watcher {
                         )));
                         break;
                     }
-                    let contents = config::read(&path);
+                    let contents = config::read_all(&path);
                     // Some editors briefly lock/remove the file. Retry only after
                     // a notification, bounded to 750ms; no periodic idle wakeups.
                     if contents.is_err() && retries < 4 {
@@ -160,9 +164,14 @@ impl Watcher {
                         continue;
                     }
                     force = false;
-                    let parsed = contents.as_ref().map_err(Clone::clone).and_then(|text| {
-                        Config::parse(text).map_err(|error| format!("{}: {error}", path.display()))
-                    });
+                    let parsed =
+                        contents
+                            .as_ref()
+                            .map_err(Clone::clone)
+                            .and_then(|(text, saved)| {
+                                Config::parse_with(text, saved)
+                                    .map_err(|error| format!("{}: {error}", path.display()))
+                            });
                     last = contents;
                     if !send(parsed) {
                         break;
@@ -215,7 +224,7 @@ mod tests {
         fs::create_dir(&folder).unwrap();
         let path = folder.join("config.toml");
         fs::write(&path, "").unwrap();
-        let watcher = Watcher::new(path.clone(), "".into(), None).unwrap();
+        let watcher = Watcher::new(path.clone(), (String::new(), String::new()), None).unwrap();
         assert!(
             watcher
                 .updates

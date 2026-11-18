@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{LPARAM, RECT, WPARAM};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
@@ -18,13 +18,14 @@ use wm_bar_protocol::{Command as BarCommand, Host as BarHost, Snapshot as BarSna
 
 use crate::bindings::{Action, Binding, Hotkeys};
 use crate::cloak::{self, Cloaker};
-use crate::config::{self, Config};
+use crate::config::{self, Config, Joining, RuleMode};
 use crate::config_watch::{self, Watcher};
 use crate::events::{self, Event};
 use crate::frame_clock::FrameClock;
-use crate::layout::{Direction, Mode, Placement, Rect, Width, Workspaces};
+use crate::layout::{Arranged, Direction, Mode, Placement, Rect, Width, Workspaces};
 use crate::overview::{Overview, Target};
 use crate::rules::{Rule, Rules};
+use crate::setups::{self, App, Spot};
 use crate::stage::{self, SceneWindow, Stage};
 use crate::window::{Snapshot, Window};
 
@@ -35,8 +36,9 @@ static LOOP_THREAD: AtomicU32 = AtomicU32::new(0);
 /// back where it was.
 pub fn run(path: PathBuf) -> std::result::Result<(), Box<dyn std::error::Error>> {
     config::init(&path)?;
-    let initial = config::read(&path)?;
-    let config = Config::parse(&initial).map_err(|error| format!("{}: {error}", path.display()))?;
+    let initial = config::read_all(&path)?;
+    let config = Config::parse_with(&initial.0, &initial.1)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     let viewport = config.viewport(work_area()?)?;
     let thread = unsafe { GetCurrentThreadId() };
     LOOP_THREAD.store(thread, Ordering::Relaxed);
@@ -52,7 +54,7 @@ pub fn run(path: PathBuf) -> std::result::Result<(), Box<dyn std::error::Error>>
     println!(
         "Tiling. Hotkeys and all defaults are documented in that file. Ctrl+C quits and restores."
     );
-    let mut manager = Manager::new(config, viewport)?;
+    let mut manager = Manager::new(config, viewport, setups::path(&path))?;
     manager.bar.announce();
 
     let mut message = MSG::default();
@@ -165,7 +167,30 @@ struct Manager {
     /// The keyboard is to go to the layout's focused window as soon as the
     /// pictures allow it.
     deferred: bool,
+    /// Where the save key writes setups.
+    setups_file: PathBuf,
+    loading: Option<Loading>,
+    /// Windows placed without focus, and when. Their app may take the
+    /// keyboard as they open, and ours takes it back.
+    quiet: Vec<(Window, Instant)>,
 }
+
+/// The setup loaded last, whose apps take their places as their windows
+/// appear, for a while.
+struct Loading {
+    apps: Vec<App>,
+    /// The window each app has, once one has appeared.
+    claimed: Vec<Option<Window>>,
+    since: Instant,
+}
+
+/// How long a setup's launched apps have to show their windows. Apps are
+/// slow just after signing in.
+const LAUNCH_WAIT: Duration = Duration::from_secs(120);
+
+/// How long after a window is placed without focus its app taking the
+/// keyboard is undone.
+const QUIET: Duration = Duration::from_secs(3);
 
 impl Manager {
     /// Acts on one message from the queue. Breaks when the manager should exit.
@@ -254,10 +279,12 @@ impl Manager {
         }
     }
 
-    /// Adopts the windows already open, left to right as they sit on screen.
-    fn new(config: Config, viewport: Rect) -> Result<Self> {
+    /// Adopts the windows already open, left to right as they sit on screen,
+    /// then loads the startup setup.
+    fn new(config: Config, viewport: Rect, setups_file: PathBuf) -> Result<Self> {
         let mut layout = Workspaces::new(viewport, config.layout.gap);
         layout.configure(viewport, config.layout.gap, config.options.clone());
+        layout.name(&config.workspaces);
         let overview = Overview::new(config.style.clone(), config.animations.clone())?;
         let mut manager = Manager {
             bar: BarHost::new()?,
@@ -269,6 +296,9 @@ impl Manager {
             stage: Stage::new(Some(overview.window().0))?,
             overview,
             deferred: false,
+            setups_file,
+            loading: None,
+            quiet: Vec::new(),
             config,
         };
         // A run that was killed leaves its off-screen windows cloaked, and
@@ -287,8 +317,13 @@ impl Manager {
             }
         }
 
-        if let Some(window) = Window::foreground() {
+        if let Some(window) = Window::foreground()
+            && !manager.quiet.iter().any(|(quiet, _)| *quiet == window)
+        {
             manager.layout.focus(window);
+        }
+        if let Some(index) = manager.config.startup_setup {
+            manager.load_setup(index);
         }
         manager.apply();
         Ok(manager)
@@ -306,6 +341,7 @@ impl Manager {
                 self.stage.finish();
                 self.layout
                     .configure(viewport, config.layout.gap, config.options.clone());
+                self.layout.name(&config.workspaces);
                 self.overview
                     .configure(config.style.clone(), config.animations.clone());
                 self.config = config;
@@ -330,7 +366,11 @@ impl Manager {
         // overview its card just moves.
         let reshapes = matches!(
             action,
-            Action::CycleWidth | Action::Resize(_) | Action::ToggleFull | Action::Toggle(_)
+            Action::CycleWidth
+                | Action::Resize(_)
+                | Action::ToggleFull
+                | Action::Toggle(_)
+                | Action::LoadSetup(_)
         );
         if reshapes && !self.overview.is_open() {
             self.settle();
@@ -370,9 +410,20 @@ impl Manager {
             }
             Action::Quit => return ControlFlow::Break(()),
             Action::Reload => return ControlFlow::Continue(()),
+            Action::LoadSetup(index) => self.load_setup(index),
+            Action::SaveSetup(index) => {
+                self.save_setup(index);
+                return ControlFlow::Continue(());
+            }
         };
 
-        let name = format!("{action:?}");
+        let name = match action {
+            Action::LoadSetup(index) => {
+                let setup = self.config.setups.get(index);
+                format!("Setup {}", setup.map_or("?", |setup| &setup.name))
+            }
+            _ => format!("{action:?}"),
+        };
         if changed {
             if matches!(
                 action,
@@ -407,6 +458,19 @@ impl Manager {
     }
 
     fn handle(&mut self, event: Event) {
+        // An app taking the keyboard as its window opens somewhere else.
+        if let Event::Focused(window) = event
+            && Window::foreground() == Some(window)
+            && self.take_quiet(window)
+        {
+            self.apply();
+            if self.overview.is_open() {
+                self.overview.window().focus();
+            } else {
+                self.focus_layout();
+            }
+            return;
+        }
         let focused = self.layout.focused();
         let active = self.layout.active().0;
         let in_overview = self.overview.is_open();
@@ -422,10 +486,16 @@ impl Manager {
         };
 
         let changed = match event {
-            Event::Appeared(window) => {
-                let new = !self.layout.contains(window) && window.is_tileable();
-                new && self.adopt(window)
+            // Windows uncloaks a window that takes the keyboard. One of ours
+            // that has since lost it goes back out of sight.
+            Event::Appeared(window) if self.layout.contains(window) => {
+                if cloak::is_cloaked(window) && !window.cloaked() && self.keyboard() != Some(window)
+                {
+                    self.apply();
+                }
+                false
             }
+            Event::Appeared(window) => window.is_tileable() && self.adopt(window),
             Event::Vanished(window) => self.release(window),
             // Our own cloaking lands here too, and so late that the window may
             // be back on screen by now. Only a window that someone else has
@@ -481,7 +551,14 @@ impl Manager {
             let focus_event = matches!(event, Event::Focused(_));
             // When a window goes away Windows activates one of its own
             // choosing, which may be off screen. Ours takes over.
-            if refocused && !focus_event {
+            let hushed = match event {
+                Event::Appeared(window) => {
+                    Window::foreground() == Some(window)
+                        && self.quiet.iter().any(|(quiet, _)| *quiet == window)
+                }
+                _ => false,
+            };
+            if (refocused && !focus_event) || hushed {
                 self.focus_layout();
             }
             // A hotkey has already logged the focus changes it caused.
@@ -645,20 +722,7 @@ impl Manager {
                 .flatten()
         });
         self.layout.set_mode(window, after, width);
-
-        let spot = self.untiled.iter().find(|(known, _)| *known == window);
-        if after == Mode::Tiled {
-            self.remember(window);
-        } else if let (Mode::Tiled, Some((_, snapshot))) = (before, spot) {
-            // Never maximized, which would cover everything it floats above.
-            window.restore(Snapshot {
-                showCmd: SW_SHOWNORMAL.0 as u32,
-                ..*snapshot
-            });
-        }
-        if (before == Mode::OnTop) != (after == Mode::OnTop) {
-            window.set_topmost(after == Mode::OnTop);
-        }
+        self.changed_mode(window, before, after);
         self.rules.set(
             window,
             Rule {
@@ -678,28 +742,310 @@ impl Manager {
         true
     }
 
-    /// Takes the window into the layout, in the mode and at the width its
-    /// kind was last given.
+    /// What a window changing mode in the layout means for the window
+    /// itself. One that stops being tiled goes back to where it sat before,
+    /// and one that gets tiled has that spot remembered for the next time.
+    fn changed_mode(&mut self, window: Window, before: Mode, after: Mode) {
+        if before == after {
+            return;
+        }
+        let spot = self.untiled.iter().find(|(known, _)| *known == window);
+        if after == Mode::Tiled {
+            self.remember(window);
+        } else if let (Mode::Tiled, Some((_, snapshot))) = (before, spot) {
+            // Never maximized, which would cover everything it floats above.
+            window.restore(Snapshot {
+                showCmd: SW_SHOWNORMAL.0 as u32,
+                ..*snapshot
+            });
+        }
+        if (before == Mode::OnTop) != (after == Mode::OnTop) {
+            window.set_topmost(after == Mode::OnTop);
+        }
+    }
+
+    /// Takes the window into the layout: where the setup being loaded wants
+    /// it, or else as the window rules and its kind's last mode and width say.
     fn adopt(&mut self, window: Window) -> bool {
+        let (exe, class, title) = (
+            window.exe().unwrap_or_default(),
+            window.class(),
+            window.title(),
+        );
         let opening = self.opening_mode(window);
-        let Some(Rule { mode, width }) = self.config.resolve_rule(
-            &window.exe().unwrap_or_default(),
-            &window.class(),
-            &window.title(),
+        let joining = self.config.resolve_rule(
+            &exe,
+            &class,
+            &title,
             self.rules.get(window, opening),
             opening,
             self.layout.default_width(),
-        ) else {
-            return false;
+        );
+        let (item, focus) = match self.claim(window, &exe, &class, &title, joining.as_ref()) {
+            Some(item) => (item, false),
+            None => {
+                let Some(Joining {
+                    rule: Rule { mode, width },
+                    workspace,
+                    focus,
+                }) = joining
+                else {
+                    return false;
+                };
+                let index = self.workspace_index(workspace.as_ref());
+                let item = Arranged {
+                    window,
+                    mode,
+                    width,
+                    workspace: index,
+                    after: self.layout.column_focus(index),
+                };
+                (item, focus)
+            }
         };
         if !self.untiled.iter().any(|(known, _)| *known == window) {
             self.remember(window);
         }
-        self.layout.insert(window, mode, width);
-        if mode == Mode::OnTop {
+        self.layout.arrange(&[item]);
+        if focus {
+            self.layout.focus(window);
+        } else {
+            self.quiet.retain(|(_, since)| since.elapsed() < QUIET);
+            self.quiet.push((window, Instant::now()));
+        }
+        if item.mode == Mode::OnTop {
             window.set_topmost(true);
         }
         true
+    }
+
+    /// Whether the window was placed without focus a moment ago, forgetting
+    /// it either way.
+    fn take_quiet(&mut self, window: Window) -> bool {
+        let found = self.quiet.iter().position(|(quiet, _)| *quiet == window);
+        found.is_some_and(|index| self.quiet.swap_remove(index).1.elapsed() < QUIET)
+    }
+
+    /// The workspace a setup or rule means, counted from the top. A missing
+    /// name means the one on screen, and a number past the end a new one.
+    fn workspace_index(&self, spot: Option<&Spot>) -> usize {
+        match spot {
+            Some(Spot::Name(name)) => self.layout.named(name),
+            Some(Spot::Number(number)) => Some(*number as usize - 1),
+            None => None,
+        }
+        .unwrap_or(self.layout.active().0)
+    }
+
+    /// A workspace a setup or rule means, as its number from the top, so that
+    /// a name and the number of the same workspace compare equal. `None` for
+    /// the one on screen.
+    fn destination(&self, spot: Option<&Spot>) -> Option<u32> {
+        match spot? {
+            Spot::Number(number) => Some(*number),
+            Spot::Name(name) => self
+                .config
+                .workspaces
+                .iter()
+                .position(|known| known == name)
+                .map(|index| index as u32 + 1),
+        }
+    }
+
+    /// Where the setup being loaded wants a window that just appeared, if
+    /// it's one of the apps still waiting for one: right of the app before
+    /// it in the same workspace, or else leftmost.
+    fn claim(
+        &mut self,
+        window: Window,
+        exe: &str,
+        class: &str,
+        title: &str,
+        joining: Option<&Joining>,
+    ) -> Option<Arranged<Window>> {
+        let loading = self
+            .loading
+            .as_mut()
+            .filter(|loading| loading.since.elapsed() < LAUNCH_WAIT)?;
+        let number = (0..loading.apps.len()).find(|number| {
+            loading.claimed[*number].is_none() && loading.apps[*number].matches(exe, class, title)
+        })?;
+        loading.claimed[number] = Some(window);
+        let app = loading.apps[number].clone();
+        let others: Vec<_> = loading
+            .claimed
+            .iter()
+            .zip(&loading.apps)
+            .enumerate()
+            .filter_map(|(other, (claimed, other_app))| {
+                Some((other, (*claimed)?, other_app.workspace.clone()))
+            })
+            .collect();
+        // The setup's other windows bound for the same workspace, still in
+        // the layout, in setup order.
+        let destination = self.destination(app.workspace.as_ref());
+        let mates: Vec<_> = others
+            .into_iter()
+            .filter(|(other, mate, spot)| {
+                *other != number
+                    && self.layout.contains(*mate)
+                    && self.destination(spot.as_ref()) == destination
+            })
+            .collect();
+        let after = mates
+            .iter()
+            .rev()
+            .filter(|(other, ..)| *other < number)
+            .map(|(_, mate, _)| *mate)
+            .find(|mate| self.layout.mode(*mate) == Some(Mode::Tiled));
+        let workspace = after
+            .into_iter()
+            .chain(mates.iter().map(|(_, mate, _)| *mate))
+            .find_map(|mate| self.layout.workspace_of(mate))
+            .unwrap_or_else(|| self.workspace_index(app.workspace.as_ref()));
+        let learned = joining.map(|joining| joining.rule);
+        Some(Arranged {
+            window,
+            mode: app
+                .mode
+                .and_then(RuleMode::mode)
+                .or(learned.map(|rule| rule.mode))
+                .unwrap_or(Mode::Tiled),
+            width: app.width(
+                learned.and_then(|rule| rule.width),
+                self.layout.default_width(),
+            ),
+            workspace,
+            after,
+        })
+    }
+
+    /// Moves the open windows of a setup's apps into place and launches the
+    /// apps that have none, whose windows take their places as they appear.
+    /// Windows that aren't in the setup stay where they are.
+    fn load_setup(&mut self, index: usize) -> bool {
+        let Some(setup) = self.config.setups.get(index) else {
+            return false;
+        };
+        let (name, apps) = (setup.name.clone(), setup.apps.clone());
+        let open: Vec<_> = self
+            .layout
+            .placements()
+            .map(|placement| {
+                let window = placement.window;
+                let exe = window.exe().unwrap_or_default();
+                (window, exe, window.class(), window.title())
+            })
+            .collect();
+        let mut claimed: Vec<Option<Window>> = vec![None; apps.len()];
+        for (number, app) in apps.iter().enumerate() {
+            claimed[number] = open
+                .iter()
+                .find(|(window, exe, class, title)| {
+                    !claimed.contains(&Some(*window)) && app.matches(exe, class, title)
+                })
+                .map(|(window, ..)| *window);
+        }
+
+        let default_width = self.layout.default_width();
+        let mut items = Vec::new();
+        let mut modes = Vec::new();
+        for (app, window) in apps.iter().zip(&claimed) {
+            let Some(window) = *window else {
+                continue;
+            };
+            let Some(before) = self.layout.mode(window) else {
+                continue;
+            };
+            let width = self
+                .layout
+                .width(window)
+                .or_else(|| self.rules.get(window, self.opening_mode(window)).width);
+            let item = Arranged {
+                window,
+                mode: app.mode.and_then(RuleMode::mode).unwrap_or(before),
+                width: app.width(width, default_width),
+                workspace: self.workspace_index(app.workspace.as_ref()),
+                after: None,
+            };
+            modes.push((window, before, item.mode));
+            items.push(item);
+        }
+        self.layout.arrange(&items);
+        for (window, before, after) in modes {
+            self.changed_mode(window, before, after);
+        }
+
+        let launches: Vec<_> = apps
+            .iter()
+            .zip(&claimed)
+            .filter(|(_, window)| window.is_none())
+            .filter_map(|(app, _)| Some((app.run.clone()?, app.args.clone())))
+            .collect();
+        self.log_always(&format!(
+            "Setup {name}: {} placed, {} launching",
+            items.len(),
+            launches.len()
+        ));
+        setups::launch(launches);
+        self.loading = Some(Loading {
+            apps,
+            claimed,
+            since: Instant::now(),
+        });
+        true
+    }
+
+    /// Makes the layout as it is now the setup's apps, and writes them to
+    /// setups.toml.
+    fn save_setup(&mut self, index: usize) {
+        let names: Vec<Option<String>> = self
+            .layout
+            .names()
+            .map(|name| name.map(str::to_owned))
+            .collect();
+        let apps: Vec<App> = self
+            .layout
+            .placements()
+            .filter_map(|placement| {
+                let window = placement.window;
+                let mode = self.layout.mode(window)?;
+                let path = window.exe_path()?;
+                let exe = path.file_name()?.to_string_lossy().into_owned();
+                let pinned = matches!(mode, Mode::Sticky | Mode::OnTop);
+                let workspace = (!pinned).then(|| match &names[placement.workspace] {
+                    Some(name) => Spot::Name(name.clone()),
+                    None => Spot::Number(placement.workspace as u32 + 1),
+                });
+                let width = self.layout.width(window);
+                // Store apps can't be started from their frame's program.
+                let launchable = !exe.eq_ignore_ascii_case("ApplicationFrameHost.exe");
+                Some(App {
+                    run: launchable.then(|| path.to_string_lossy().into_owned()),
+                    exe,
+                    class: Some(window.class()),
+                    workspace,
+                    mode: Some(RuleMode::of(mode)),
+                    width: width.map(|width| width.pixels),
+                    full_width: width.map(|width| width.full),
+                    ..App::default()
+                })
+            })
+            .collect();
+        let Some(setup) = self.config.setups.get_mut(index) else {
+            return;
+        };
+        let count = apps.len();
+        setup.apps = apps;
+        let name = setup.name.clone();
+        setups::save(
+            self.setups_file.clone(),
+            setups::render(&self.config.setups),
+        );
+        self.log_always(&format!(
+            "Saved setup {name}: {count} windows to {}",
+            self.setups_file.display()
+        ));
     }
 
     /// Records where the window sits now as its place when it isn't tiled.
