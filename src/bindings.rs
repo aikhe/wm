@@ -2,6 +2,7 @@
 //! the input loop. Rebinding registers additions before removing old keys.
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, RegisterHotKey, UnregisterHotKey,
 };
@@ -162,6 +163,24 @@ fn parse_key(text: &str) -> Option<u16> {
     })
 }
 
+/// An action's keys in the config: one chord, or a list of them for
+/// alternatives such as `["Alt+H", "Alt+A"]`. Blank entries are skipped.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Keys {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Keys {
+    fn texts(&self) -> Vec<&str> {
+        match self {
+            Keys::One(text) => vec![text.as_str()],
+            Keys::Many(texts) => texts.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub chord: Chord,
@@ -169,33 +188,48 @@ pub struct Binding {
     pub name: String,
 }
 
-pub fn compile(overrides: &BTreeMap<String, String>) -> Result<Vec<Binding>, String> {
+/// `extra` binds keys set outside `[hotkeys]`, each with the label its
+/// errors name.
+pub fn compile(
+    overrides: &BTreeMap<String, Keys>,
+    extra: &[(String, Keys, Action)],
+) -> Result<Vec<Binding>, String> {
     for name in overrides.keys() {
         if !DEFAULTS.iter().any(|(known, _, _)| known == name) {
             return Err(format!("unknown hotkeys action `{name}`"));
         }
     }
+    let configured = DEFAULTS.iter().map(|(name, default, action)| {
+        let keys = overrides
+            .get(*name)
+            .map_or_else(|| vec![*default], Keys::texts);
+        (format!("hotkeys.{name}"), keys, *action)
+    });
+    let extra = extra
+        .iter()
+        .map(|(label, keys, action)| (label.clone(), keys.texts(), *action));
     let mut bindings: Vec<Binding> = Vec::new();
-    for (name, default, action) in DEFAULTS {
-        let text = overrides.get(name).map_or(default, String::as_str).trim();
-        if text.is_empty() {
-            if action == Action::Quit {
-                return Err("hotkeys.quit must remain bound".into());
+    for (label, keys, action) in configured.chain(extra) {
+        let mut bound = false;
+        for text in keys
+            .iter()
+            .map(|text| text.trim())
+            .filter(|text| !text.is_empty())
+        {
+            let chord = Chord::parse(text).map_err(|error| format!("{label}: {error}"))?;
+            if let Some(other) = bindings.iter().find(|binding| binding.chord == chord) {
+                return Err(format!("{label} conflicts with {} ({text})", other.name));
             }
-            continue;
+            bindings.push(Binding {
+                chord,
+                action,
+                name: label.clone(),
+            });
+            bound = true;
         }
-        let chord = Chord::parse(text).map_err(|error| format!("hotkeys.{name}: {error}"))?;
-        if let Some(other) = bindings.iter().find(|binding| binding.chord == chord) {
-            return Err(format!(
-                "hotkeys.{name} conflicts with hotkeys.{} ({text})",
-                other.name
-            ));
+        if !bound && action == Action::Quit {
+            return Err("hotkeys.quit must remain bound".into());
         }
-        bindings.push(Binding {
-            chord,
-            action,
-            name: name.into(),
-        });
     }
     Ok(bindings)
 }
@@ -242,7 +276,7 @@ impl Hotkeys {
                     unregister(chord);
                 }
                 return Err(format!(
-                    "couldn't register hotkeys.{}: {error}; previous settings kept",
+                    "couldn't register {}: {error}; previous settings kept",
                     binding.name
                 ));
             }
@@ -292,23 +326,54 @@ mod tests {
             Chord::parse("shift+ALT+Ctrl+equals"),
             Chord::parse("control+alt+SHIFT+=")
         );
-        let overrides = BTreeMap::from([("focus_left".into(), "alt+l".into())]);
-        assert!(compile(&overrides).unwrap_err().contains("conflicts"));
+        let overrides = BTreeMap::from([("focus_left".into(), Keys::One("alt+l".into()))]);
+        assert!(compile(&overrides, &[]).unwrap_err().contains("conflicts"));
         assert!(Chord::parse("Alt+Alt+H").is_err());
         assert!(Chord::parse("Alt+H+J").is_err());
         assert!(Chord::parse("F25").is_err());
     }
 
     #[test]
+    fn an_action_can_have_several_keys_or_none() {
+        let keys = |texts: &[&str]| Keys::Many(texts.iter().map(|t| t.to_string()).collect());
+        let overrides = BTreeMap::from([
+            ("focus_left".into(), keys(&["Alt+H", "Alt+A"])),
+            ("overview".into(), keys(&[])),
+        ]);
+        let bindings = compile(&overrides, &[]).unwrap();
+        let focus_left: Vec<_> = bindings
+            .iter()
+            .filter(|binding| binding.action == Action::Focus(Direction::Left))
+            .map(|binding| binding.chord)
+            .collect();
+        assert_eq!(
+            focus_left,
+            [
+                Chord::parse("Alt+H").unwrap(),
+                Chord::parse("Alt+A").unwrap()
+            ]
+        );
+        assert!(
+            !bindings
+                .iter()
+                .any(|binding| binding.action == Action::Overview)
+        );
+        let clash = BTreeMap::from([("focus_left".into(), keys(&["Alt+H", "Alt+L"]))]);
+        assert!(compile(&clash, &[]).unwrap_err().contains("conflicts"));
+        let unbound = BTreeMap::from([("quit".into(), keys(&[]))]);
+        assert!(compile(&unbound, &[]).is_err());
+    }
+
+    #[test]
     fn failed_rebinding_rolls_back_additions_and_preserves_old_actions() {
-        let old = compile(&BTreeMap::new()).unwrap();
+        let old = compile(&BTreeMap::new(), &[]).unwrap();
         let mut keys = Hotkeys::default();
         keys.replace_with(old.clone(), |_| Ok(()), |_| {}).unwrap();
         let overrides = BTreeMap::from([
-            ("focus_left".into(), "Alt+U".into()),
-            ("focus_right".into(), "Alt+I".into()),
+            ("focus_left".into(), Keys::One("Alt+U".into())),
+            ("focus_right".into(), Keys::One("Alt+I".into())),
         ]);
-        let new = compile(&overrides).unwrap();
+        let new = compile(&overrides, &[]).unwrap();
         let mut added = Vec::new();
         let mut undone = Vec::new();
         let failed = keys.replace_with(
@@ -332,14 +397,14 @@ mod tests {
     #[test]
     fn swapping_actions_on_existing_chords_does_not_reregister_keys() {
         let mut keys = Hotkeys {
-            bindings: compile(&BTreeMap::new()).unwrap(),
+            bindings: compile(&BTreeMap::new(), &[]).unwrap(),
         };
         let overrides = BTreeMap::from([
-            ("focus_left".into(), "Alt+L".into()),
-            ("focus_right".into(), "Alt+H".into()),
+            ("focus_left".into(), Keys::One("Alt+L".into())),
+            ("focus_right".into(), Keys::One("Alt+H".into())),
         ]);
         keys.replace_with(
-            compile(&overrides).unwrap(),
+            compile(&overrides, &[]).unwrap(),
             |_| panic!("already registered"),
             |_| panic!("still needed"),
         )

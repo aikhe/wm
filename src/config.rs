@@ -8,7 +8,7 @@ use serde::Deserialize;
 use windows::Win32::Foundation::COLORREF;
 
 use crate::animation::Animations;
-use crate::bindings::{self, Action, Binding};
+use crate::bindings::{self, Action, Binding, Keys};
 use crate::layout::{Fraction, Mode, Options, Rect, Width};
 use crate::rules::Rule;
 
@@ -21,7 +21,7 @@ struct Document {
     behavior: Behavior,
     overview: Overview,
     animations: Animations,
-    hotkeys: BTreeMap<String, String>,
+    hotkeys: BTreeMap<String, Keys>,
     agent: Agent,
     window_rules: Vec<WindowRule>,
 }
@@ -278,7 +278,7 @@ impl Config {
                 ));
             }
         }
-        let bindings = bindings::compile(&hotkeys)?;
+        let bindings = bindings::compile(&hotkeys, &[])?;
         let mut agent_allow = Vec::new();
         for name in agent.allow {
             let index = bindings::action_index(&name)
@@ -483,12 +483,16 @@ mod tests {
             "[animations.overview]\nenabeld=true",
             "[hotkeys]\nquit=''",
             "[hotkeys]\nfocas_left='Alt+H'",
+            "[hotkeys]\nfocus_left=1",
+            "[hotkeys]\nfocus_left=['Alt+H', 'Alt+Nope']",
             "[[window_rules]]\nmode='float'",
             "[[window_rules]]\nexe='a.exe'\nmode='typo'",
         ] {
             assert!(Config::parse(text).is_err(), "accepted {text}");
         }
         let config = Config::parse("[layout]\nreserved_top=900").unwrap();
+        let doubled = Config::parse("[hotkeys]\nfocus_left=['Alt+H', 'Alt+A']").unwrap();
+        assert_eq!(doubled.bindings.len(), bindings::DEFAULTS.len() + 1);
         assert!(
             config
                 .viewport(Rect {

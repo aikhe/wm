@@ -104,6 +104,7 @@ enter_escape_close = true
 # Bindings call actions directly in this process. No shell commands are spawned.
 # Omitted actions retain these defaults. Set an action to "" to disable it,
 # except quit, which must remain bound. Duplicate key combinations are errors.
+# A list binds several keys to one action: focus_left = ["Alt+H", "Alt+A"].
 # Modifiers: Alt, Ctrl, Shift, Win. Keys: A-Z, 0-9, F1-F24, arrows, Space,
 # Tab, Enter, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown,
 # Minus, Equals, Comma, Period, Semicolon, Slash, Backslash, LeftBracket,
