@@ -30,12 +30,27 @@ clamping. Default widths and explicit app rules apply when windows next join
 
 For example, edit the existing `[layout]` section's `reserved_top` to leave room
 for a bar, or edit `[hotkeys]` to rebind an action. Omitted settings retain built-in
-defaults; `""` disables a hotkey except `quit`. The template lists accepted key
+defaults; `""` disables a hotkey except `quit`, and a list such as
+`["Alt+H", "Alt+A"]` binds several keys to one action. The template lists accepted key
 names and commented `[[window_rules]]` examples.
+
+Name workspaces with `workspaces = ["web", "chat", "code"]` at the top of the
+config; they stay even when empty. A window rule's `workspace = "chat"` opens
+that app there, and `focus = false` keeps your view where it is.
+
+A setup is a list of apps with the workspace, mode and width each belongs at.
+Its `key` moves their open windows into place and launches the rest, placing
+their windows as they appear. Write the apps in `[setups.NAME]`, or leave them
+out and press its `save_key` to save the layout as it is to `setups.toml`.
+`[behavior] startup_setup` loads one when wm starts. The template has examples.
 
 Learned modes/widths stay in `%APPDATA%\wm\rules.txt`, saved on graceful exit.
 Explicit rule fields take precedence over remembered values; wm never overwrites
 your config while recording learned behavior.
+
+Windows that look like dialogs (no resize border, or the `#32770` dialog class)
+open floating, as in niri. Alt+T tiles one and is remembered for its kind;
+`[behavior] float_dialogs = false` turns this off.
 
 Other commands:
 

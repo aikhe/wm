@@ -69,6 +69,8 @@ layout model on Windows, in pure Rust calling the Win32 API directly.
   posted notifications with ACKs; no IPC threads or serialization in the WM.
   Bar commands use the existing actions; hotkeys still call them directly.
   The bar owns scoped title hooks and its minute clock. `bar.toml` hot-reloads.
+  It registers as a shell appbar only to hear `ABN_FULLSCREENAPP`, never to
+  reserve space, and drops to the bottom while a fullscreen app is open.
   CPU and physical-memory widgets use native GetSystemTimes/GlobalMemoryStatusEx
   on the bar thread, with timers only while enabled (2s/5s defaults). The
   `themes/yasb.toml` profile matches Ike's compact 18px personal YASB styling.
@@ -124,8 +126,19 @@ Don't use GlazeWM as a reference; Ike finds it too slow.
   learned state, then omitted values fall back to built-in defaults.
 - Learned state stays in `rules.txt`; wm never writes user changes back to
   `config.toml`. Explicit rules can match exe, class and title substring, and set
-  tiled/float/sticky/top/ignore, width and full width. All present match conditions
-  must match; executable names are case insensitive.
+  tiled/float/sticky/top/ignore, width, full width, and the workspace a window
+  opens on (`focus = false` places it there without following). All present
+  match conditions must match; executable names are case insensitive.
+- Top-level `workspaces = [...]` names workspaces, which sit at the top in that
+  order and stay when empty, as in niri. Rules and setups target them by name,
+  or any workspace by number from the top.
+- `[setups.NAME]` lists apps with their workspace, mode and width; its `key`
+  moves the open windows of those apps into place (left to right in list
+  order), launches the rest with `ShellExecute` on a thread, and places their
+  windows as they appear for two minutes, without focus. A setup without
+  `apps` keeps them in `setups.toml` beside the config, which its `save_key`
+  rewrites from the layout on a thread; it's parsed with the config and
+  hot-reloads with it. `behavior.startup_setup` loads one when wm starts.
 
 - `cargo run` tiles the desktop. Alt+H/L moves focus between columns and
   Alt+K/J between workspaces; add Shift to move the focused column instead.
@@ -146,6 +159,9 @@ Don't use GlazeWM as a reference; Ike finds it too slow.
   it on the highlighted window; a click goes to that window or workspace.
 - Alt+Shift+W closes the window. Alt+Shift+E or Ctrl+C quits and restores
   every window.
+- Windows that look like dialogs open floating, as in niri: ones with no
+  resize border or the `#32770` dialog class. `behavior.float_dialogs`
+  turns this off; explicit and learned rules win over it.
 - The mode a window is put in and the width its column is given become the
   rule for its kind (program file name plus window class), so the next one
   opens the same way. Rules are written to `%APPDATA%\wm\rules.txt` on quit,
@@ -155,8 +171,9 @@ Don't use GlazeWM as a reference; Ike finds it too slow.
 - Every hotkey and window event that changes something prints a line: what
   happened, the workspace on screen, then the focused window and how it's
   kept.
-- Workspaces are never made by hand: the bottom one is always empty, and
-  others disappear once emptied and left.
+- Workspaces are never made by hand: named ones come from the config and
+  always stay, the bottom one is always empty, and others disappear once
+  emptied and left.
 - `cargo run -- list` prints what would be tiled and what is skipped, with the
   reason, without touching anything.
 - `cargo test -- --ignored` cloaks and uncloaks one real window to check the
