@@ -1,196 +1,155 @@
 # wm
 
-A scrollable-tiling window manager for Windows, built for Ike's own use: niri's
-layout model on Windows, in pure Rust calling the Win32 API directly.
+Scrollable-tiling window manager for Windows, modeled after niri in pure Rust
+calling Win32 directly.
 
-## Goals
+## Principles
 
-- Lightweight and fast, with zero CPU use when idle.
-- Switching stays instant when apps or the whole machine are lagging, the way
-  Alt+Tab does.
+- **Instant under load:** Switching must feel like Alt+Tab even when apps or
+  the machine lag. Nothing sits between a hotkey and its action, and `wm` never
+  waits on another app.
+- **Zero idle CPU:** One thread blocked on `GetMessageW`, out-of-context
+  WinEvents, and a directory-notification config watcher. No async runtime, no
+  polling, no idle timers.
+- **Small and obvious:** Prefer the simplest design that works. Don't add
+  abstractions or keep complexity just because it exists.
 
-## Design rules
+## Safety
 
-- Hotkeys are handled in-process: `RegisterHotKey` straight into a function
-  call. No CLI, IPC or process spawn between a keypress and its action.
-- Never wait on another app. Use `SWP_ASYNCWINDOWPOS`, `ShowWindowAsync` and
-  `SendMessageTimeout`; never plain `SendMessage`.
-- Off-screen columns are cloaked, not hidden or minimized.
-- One desktop thread, one `GetMessage` loop, window events from `SetWinEventHook`
-  with `WINEVENT_OUTOFCONTEXT`. No async runtime and no polling. A config worker
-  blocks on Windows directory notifications and parses saves off the input thread.
-  Only while something is animating, the loop instead makes one frame per
-  `DwmFlush` and takes input between frames.
-- Layout is a pure function from state to window rectangles, and only the
-  differences get applied. This is the part worth unit testing.
-- Window events arrive late, after hotkeys that came in behind them. Check the
-  window's state as it is now before acting on one, never the event alone.
-- Floating windows are tracked but never positioned. They stay above tiled
-  ones by being raised again when a tiled window takes focus, not by topmost.
-- The overview is a view of the layout, with no state of its own: the
-  highlight is the layout's focused window, and it redraws after every
-  `apply`. Its pictures are DWM thumbnails, never `PrintWindow`, which asks
-  the app to draw. Its window's messages are handled in the one loop, not in
-  a window procedure. Its window is only the backdrop; the pictures, and the
-  highlight round the focused one, are on the stage above it.
-- Scrolling moves windows and never resizes them.
-- No animations unless Ike asks for them.
-- Ike asked for configurable animations, to feel like niri's: column
-  scrolls, workspace slides and the overview zoom. They are presentation only.
-  Focus changes at once, and nothing waits for an animation to end.
-  - Windows are never animated themselves: no per-frame `SetWindowPos`, no
-    waiting on an app's repaint. The stage (`stage.rs`), a see-through,
-    click-through surface, moves a DWM thumbnail of each window instead.
-  - Nothing may flash. Pictures first appear exactly over the real windows;
-    one composed frame later the real ones are cloaked and placed where they
-    end up; when the pictures come to rest the real ones are uncloaked beneath
-    them before the pictures go. Two copies in one spot look like one, a frame
-    with neither doesn't. The stage paints nothing of its own, so the
-    wallpaper is never covered.
-  - Windows uncloaks a window that takes the keyboard, by itself and a
-    moment later, and takes the keyboard from one that's cloaked. So the
-    focused window is never cloaked under its picture: it waits uncloaked a
-    screen's height below its place, and takes the keyboard only once it's
-    there. Check `Window::cloaked` as well as our mark, which can outlive
-    the cloak.
-  - Pictures on the desktop are drawn at the window's real size, never scaled.
-    Only the overview scales them.
-  - Motion is critically damped springs (`animation.rs`), stepped exactly, one
-    per edge of each picture. A key pressed mid-move retargets them from where
-    they are, keeping their speed. Never restart a move or queue one.
-  - Frames are paced by `DwmFlush` and advance by whole refreshes, not by a
-    timer, which drifts against the screen and judders.
-  - Width and mode changes apply instantly, with everything at rest.
-  - `[animations]` hot-reloads with the rest of the config.
-- Add crates reluctantly. `windows`/`windows-core` provide Win32; `serde` and
-  `toml` parse configuration only at startup and on reload, never on a keypress.
-- `wm-bar` is a separate optional Rust/GDI process in `crates/bar`. The private
-  `crates/bar-protocol` crate publishes a small atomic mapping and coalesces
-  posted notifications with ACKs; no IPC threads or serialization in the WM.
-  Bar commands use the existing actions; hotkeys still call them directly.
-  The bar owns scoped title hooks and its minute clock. `bar.toml` hot-reloads.
-  It registers as a shell appbar only to hear `ABN_FULLSCREENAPP`, never to
-  reserve space, and drops to the bottom while a fullscreen app is open.
-  CPU and physical-memory widgets use native GetSystemTimes/GlobalMemoryStatusEx
-  on the bar thread, with timers only while enabled (2s/5s defaults). The
-  `themes/yasb.toml` profile matches Ike's compact 18px personal YASB styling.
-  Use manual `layout.reserved_top` matching `bar.height`, primary monitor only.
-  Build/test both with `cargo build --workspace` / `cargo test --workspace`.
-  Never launch the visible bar for agent verification; its renderer tests use
-  a private bitmap and the protocol tests use hidden windows only.
+- **Never launch tiling mode or a visible bar unasked:** `cargo run` rearranges
+  the live desktop and `cargo run -p wm-bar` puts a bar on screen. Verify with
+  `cargo test --workspace`, `cargo run -- list`, and `cargo run -- config check`.
+  (Stop komorebi/whkd before tiling so they don't fight over windows/hotkeys.)
+- **Never write to `%APPDATA%\wm\`:** That holds live `config.toml`, `bar.toml`,
+  `setups.toml`, and `rules.txt`. Use `--config <temp-path>` for CLI checks.
+- **Always use PowerShell:** Shells that set `__COMPAT_LAYER` (like Git Bash)
+  force DPI-unaware and make `SetProcessDpiAwarenessContext` fail with
+  `Access is denied`.
+- **Never block on other apps or poll while idle:** Avoid plain `SendMessage`,
+  `PrintWindow`, and idle timers. Use `SWP_ASYNCWINDOWPOS`, `ShowWindowAsync`,
+  `SendMessageTimeout`, and DWM thumbnails.
 
-## References
+## Codebase
 
-`references/` is gitignored and holds clones to read, not to copy from:
+- `src/layout.rs`, `src/layout/workspaces.rs` — Pure layout state → rects and
+  diffs (main unit-test surface).
+- `src/manager.rs`, `src/events.rs`, `src/bindings.rs`, `src/window.rs`,
+  `src/cloak.rs` — Message loop, `RegisterHotKey`, WinEvents, window snapshots,
+  and cloaking (`wm.cloaked`).
+- `src/stage.rs`, `src/animation.rs`, `src/frame_clock.rs`, `src/overview.rs`,
+  `src/thumbnail.rs` — DWM thumbnail stage, springs, `DwmFlush` pacing, and
+  overview backdrop.
+- `src/config.rs`, `src/config_watch.rs`, `src/rules.rs`, `src/setups.rs` —
+  TOML config, hot-reload watcher, learned `rules.txt`, and setups. Defaults:
+  [wm.default.toml](wm.default.toml).
+- `crates/bar-protocol` — Private versioned shared-memory (`AtomicU64`) and
+  window-message protocol for `wm`, `wm do`, and `wm-bar`.
+- `crates/bar` — Optional Win32/GDI top bar (`wm-bar`). Defaults:
+  [crates/bar/bar.default.toml](crates/bar/bar.default.toml).
+- `.agents/references/` — Gitignored, read-only references when present (`niri`
+  for `src/layout/scrolling.rs`, `komorebi` for Win32 quirks, `LeopardWM` for
+  floating/sticky/z-order in `crates/platform_win32/`). Never edit them, copy
+  from them, or use GlazeWM.
 
-- `komorebi`: how to deal with Win32 (window filtering, cloaking, focus,
-  borders). Its scrolling layout lives in `komorebi-scrolling/`.
-- `niri`: the layout model to match, mainly `src/layout/scrolling.rs`.
-- `LeopardWM`: another scrolling manager for Windows in Rust (GPL-3), useful
-  for how it handles floating, sticky and z-order in
-  `crates/platform_win32/`.
+## Architecture
 
-Don't use GlazeWM as a reference; Ike finds it too slow.
+### Win32 & events
 
-## Build order
+- **In-process hotkeys:** `RegisterHotKey` dispatches directly to a function
+  call—no CLI, IPC, or process spawn.
+- **Cloak off-screen windows:** Cloak off-screen columns and mark them with
+  `wm.cloaked` so startup/exit cleans up after crashes. Never hide or minimize
+  managed windows.
+- **Re-check late WinEvents:** `SetWinEventHook` (`WINEVENT_OUTOFCONTEXT`) can
+  arrive after newer hotkeys. Always re-check live window state before acting.
+- **Floating z-order:** Track floating windows per workspace without
+  positioning them. Keep them above tiled windows by re-raising on tiled focus;
+  only `top` mode uses topmost.
+- **Unwind on panic:** Release builds intentionally unwind (no `panic = "abort"`)
+  so `Drop` still uncloaks and restores windows.
 
-1. Enumerate and filter windows.
-2. One monitor, one workspace, a column strip, focus left/right by hotkey.
-3. Cloak off-screen columns; move column; width presets.
-4. Vertical workspaces, then multi-monitor, then a config file.
+### Layout & config
 
-## Running
+- **Pure layout:** State maps purely to rects; apply diffs only. Scrolling
+  moves windows without resizing them.
+- **Workspaces:** Named workspaces stay at the top even when empty; the bottom
+  workspace is always empty; unnamed workspaces vanish once emptied and left.
+- **Atomic hot-reload:** Parse off the input thread. Invalid syntax, geometry,
+  unknown keys, duplicates, or unavailable hotkeys reject the whole update and
+  keep existing workspaces, focus, modes, and hotkeys.
+- **Never mutate `config.toml`:** Learned state goes to `rules.txt` and saved
+  setups to `setups.toml`. Precedence: `[[window_rules]]` > learned state >
+  dialog floating > defaults.
 
-- `%APPDATA%\wm\config.toml` holds user settings and hotkeys. It is generated
-  automatically without overwriting existing files; `wm.default.toml` is the
-  embedded, fully commented list of defaults. Omitted values use those defaults.
-- Saving hot-reloads settings with Windows directory-change notifications,
-  including editor saves that replace the file. The worker debounces save
-  bursts by 150ms, then waits indefinitely while idle. Parsing, geometry errors,
-  unknown settings, duplicate keys and unavailable new hotkeys reject the whole
-  update; previous settings and hotkeys keep working. Alt+Shift+R retries manually.
-- `cargo run -- config init` creates the config without tiling. `config check`
-  validates its syntax, settings and current primary work-area geometry without
-  registering keys or moving windows; key availability is checked on apply.
-  `config path` prints the path; `config defaults` prints the commented template.
-  `--config PATH` selects another file for either commands or the manager.
-- `wm do ACTION` posts a named hotkey action to the running WM without waiting
-  for it to run. `[agent] allow` lists permitted names and reloads on save;
-  all actions except `close` and `quit` are allowed by default. Refusals are
-  logged by the WM. Hotkeys and bar commands do not use this list.
-- Layout geometry, navigation, hotkeys and overview appearance update live.
-  Existing workspaces/focus/modes and widths survive reloads; widths are only
-  clamped if new layout limits require it. New default widths and explicit
-  `[[window_rules]]` apply when a window joins (startup/open/restore), not to
-  already managed windows. First matching rule wins; its supplied fields override
-  learned state, then omitted values fall back to built-in defaults.
-- Learned state stays in `rules.txt`; wm never writes user changes back to
-  `config.toml`. Explicit rules can match exe, class and title substring, and set
-  tiled/float/sticky/top/ignore, width, full width, and the workspace a window
-  opens on (`focus = false` places it there without following). All present
-  match conditions must match; executable names are case insensitive.
-- Top-level `workspaces = [...]` names workspaces, which sit at the top in that
-  order and stay when empty, as in niri. Rules and setups target them by name,
-  or any workspace by number from the top.
-- `[setups.NAME]` lists apps with their workspace, mode and width; its `key`
-  moves the open windows of those apps into place (left to right in list
-  order), launches the rest with `ShellExecute` on a thread, and places their
-  windows as they appear for two minutes, without focus. A setup without
-  `apps` keeps them in `setups.toml` beside the config, which its `save_key`
-  rewrites from the layout on a thread; it's parsed with the config and
-  hot-reloads with it. `behavior.startup_setup` loads one when wm starts.
+### Animations & overview
 
-- `cargo run` tiles the desktop. Alt+H/L moves focus between columns and
-  Alt+K/J between workspaces; add Shift to move the focused column instead.
-  Alt+1..9 jumps to a workspace by number and Alt+Shift+1..9 takes the
-  focused window there. Floating windows move between workspaces too. Focus
-  and move wrap round the ends.
-- Alt+R cycles the focused column's width through the presets, Alt+- / Alt+=
-  step it by a tenth of the screen, and Alt+F makes it fill the screen or
-  puts it back.
-- Alt+T floats the focused window at the spot it had before it was tiled, or
-  tiles it again. Alt+Shift+T pins it to every workspace, and
-  Ctrl+Alt+Shift+T also keeps it above every other window; pressing either
-  again leaves it floating.
-- Alt+O opens the overview: every workspace as a row of live window
-  pictures, the focused window highlighted. All the hotkeys keep working on
-  it, and while it has the keyboard they work without Alt too (except quit),
-  with the arrow keys standing in for H/J/K/L. Enter, Escape or Alt+O closes
-  it on the highlighted window; a click goes to that window or workspace.
-- Alt+Shift+W closes the window. Alt+Shift+E or Ctrl+C quits and restores
-  every window.
-- Windows that look like dialogs open floating, as in niri: ones with no
-  resize border or the `#32770` dialog class. `behavior.float_dialogs`
-  turns this off; explicit and learned rules win over it.
-- The mode a window is put in and the width its column is given become the
-  rule for its kind (program file name plus window class), so the next one
-  opens the same way. Rules are written to `%APPDATA%\wm\rules.txt` on quit,
-  never on a key press: one tab-separated `mode exe class [width [full]]` per
-  line, with `tiled`, `float`, `sticky` or `top`. It can be edited by hand
-  while the manager isn't running.
-- Every hotkey and window event that changes something prints a line: what
-  happened, the workspace on screen, then the focused window and how it's
-  kept.
-- Workspaces are never made by hand: named ones come from the config and
-  always stay, the bottom one is always empty, and others disappear once
-  emptied and left.
-- `cargo run -- list` prints what would be tiled and what is skipped, with the
-  reason, without touching anything.
-- `cargo test -- --ignored` cloaks and uncloaks one real window to check the
-  undocumented shell interface still works, which blinks that window, checks
-  that Windows gives the hidden stage a thumbnail, which shows nothing, and
-  slides a picture of a test window of its own across the stage for a second,
-  reading the screen back to check that it's exact, see-through and
-  click-through. Run that last one from PowerShell.
+- **Presentation only:** Focus changes immediately. Never move real windows per
+  frame—`stage.rs` (see-through, click-through, paints nothing so wallpaper stays
+  visible) animates DWM thumbnails instead.
+- **No-flash swap:** Show thumbnails over real windows → one composed frame
+  later cloak and move real windows → once settled, uncloak real windows under
+  the thumbnails before clearing them.
+- **Focused window cloak trap:** Windows uncloaks a window that takes focus and
+  strips focus from a cloaked one. Never cloak the focused window under its
+  thumbnail—park it uncloaked one screen height below its slot and focus it
+  once placed. Check both `Window::cloaked` and `wm.cloaked`.
+- **Springs & pacing:** Critically damped springs (`animation.rs`) per edge,
+  paced by `DwmFlush` only while moving. Mid-move input retargets keeping
+  velocity. Desktop thumbnails stay 1:1 (only overview scales); width and mode
+  changes apply instantly at rest.
+- **Stateless overview:** `overview.rs` stores no layout state, redraws after
+  every `apply`, runs in the main loop, and draws only the backdrop behind
+  `stage.rs`.
 
-Cloaked windows carry a `wm.cloaked` window property, so a run that was killed
-can be cleaned up by starting and quitting the manager again.
+### Bar & `wm do`
 
-Stop komorebi and whkd before tiling (`komorebic stop --whkd`): two managers
-fight over the same windows, and whkd swallows the same hotkeys.
+- **Lock-free publish:** `wm` writes an atomic shared-memory snapshot and
+  coalesces one notification per `ACK`. No IPC threads or serialization in `wm`;
+  build `wm` and `wm-bar` together.
+- **Action gating:** `wm do` posts to the same host window and checks
+  `[agent] allow`. Hotkeys and bar commands bypass `[agent] allow`.
+- **Bar scope:** `wm-bar` targets the primary monitor using `layout.reserved_top`.
+  It registers as an appbar only for `ABN_FULLSCREENAPP` (drops behind
+  fullscreen apps), never to reserve space. Focused-thread title hooks and
+  optional `clock`/`cpu`/`memory` timers (`GetSystemTimes`/`GlobalMemoryStatusEx`)
+  live in `wm-bar` and stop when disabled.
 
-Agents must not run the tiling mode unasked. It rearranges Ike's real desktop;
-use `list` and the tests to check work instead.
+## Checklist
 
-Run it from PowerShell. If the binary exits with "Access is denied", the shell
-has set `__COMPAT_LAYER` to force DPI-unaware, as some agent Git Bash shells do.
+Before finishing a change, check what applies:
+
+- **Layout:** pure logic and unit tests (`src/layout.rs`, `src/layout/workspaces.rs`).
+- **Presentation:** `stage.rs` animations and `overview.rs` clicks/highlights.
+- **Config:** `wm.default.toml` / `crates/bar/bar.default.toml`, atomic reload, `config check`.
+- **Persistence:** `[[window_rules]]`, `rules.txt`, and `setups.toml`.
+- **External paths:** `wm do` / `[agent] allow` and `bar-protocol` / `wm-bar`.
+- **Docs:** update [README.md](README.md) only when user-facing behavior changes.
+
+## Checks
+
+Run from PowerShell:
+
+```powershell
+cargo test --workspace
+cargo build --workspace
+cargo run -- config check
+cargo run -- list
+```
+
+- Bar tests use offscreen bitmaps and hidden windows only.
+- `cargo test -- --ignored` blinks a real window and slides a test thumbnail
+  while reading the screen back—run only from PowerShell when testing cloaking
+  or `stage.rs`.
+
+## Conventions
+
+- **Dependencies:** Add crates reluctantly (`windows`/`windows-core` for Win32;
+  `serde`/`toml` only on load/reload).
+- **Comments:** Default to none. Comment only Win32 quirks or non-obvious
+  invariants.
+- **Docs:** Don't duplicate [README.md](README.md) or `*.default.toml` here;
+  rewrite stale text instead of appending.
+- **Issues & PRs:** Use `.agents/skills/issue/SKILL.md` and
+  `.agents/skills/pr/SKILL.md` when present. Don't open a PR unless asked.
+- **Push back:** Call out any rule here that conflicts with the task before
+  breaking it.
