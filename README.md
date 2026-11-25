@@ -1,197 +1,102 @@
 # wm
 
-A small scrollable tiling window manager for Windows, written in Rust.
+A fast, lightweight scrollable-tiling window manager for Windows inspired by
+[niri](https://github.com/YaLTeR/niri), written in pure Rust calling Win32
+directly.
 
-Create your configuration without moving any windows:
+## Features
 
-```powershell
-cargo run -- config init
-notepad "$env:APPDATA\wm\config.toml"
-```
+- **Scrollable tiling & overview:** Horizontal columns per vertical workspace
+  (named or dynamic) with a live zoomed-out overview (`Alt+O`).
+- **Instant input, zero idle CPU:** Single-thread Win32 loop with in-process
+  hotkeys, non-blocking placement, and no idle polling.
+- **Smooth DWM animations:** Presentation-only spring motion via DWM thumbnails
+  paced by `DwmFlush`; focus never waits for animations.
+- **Modes, rules & setups:** Floating, sticky, always-on-top, auto-floated
+  dialogs, `[[window_rules]]`, learned widths/modes (`rules.txt`), and saved
+  app layouts (`[setups.*]`).
+- **Atomic hot-reload:** Saving `%APPDATA%\wm\config.toml` reloads live;
+  invalid edits keep the current setup working.
+- **Optional bar & CLI:** Separate Win32/GDI top bar (`wm-bar`) and allow-listed
+  CLI actions (`wm do`).
 
-The file contains every setting's default and comments explaining it: layout
-gaps, width presets, resize steps, space for a bar, navigation, remembered app
-behavior, overview appearance, and all keyboard shortcuts. See
-[wm.default.toml](wm.default.toml) for the same template.
+## Quick start
 
-Run with `cargo run --release`. If an older version is running, quit it first
-with Alt+Shift+E. Stop other tiling managers and conflicting hotkey daemons first.
-
-Save `config.toml` to reload. Windows change notifications wake a worker only
-when the directory changes; there is no polling timer while idle. Ordinary saves
-and atomic file replacements both work. Save bursts settle for 150ms before
-parsing. Invalid settings or a new hotkey that another application owns leave
-the entire previous configuration working. Errors print to the console.
-
-Layout, overview, navigation and hotkeys update live, preserving workspaces and
-focus. Current column widths are retained, except when new limits require
-clamping. Default widths and explicit app rules apply when windows next join
-(startup, opening or restoring); they do not override current window modes.
-
-For example, edit the existing `[layout]` section's `reserved_top` to leave room
-for a bar, or edit `[hotkeys]` to rebind an action. Omitted settings retain built-in
-defaults; `""` disables a hotkey except `quit`, and a list such as
-`["Alt+H", "Alt+A"]` binds several keys to one action. The template lists accepted key
-names and commented `[[window_rules]]` examples.
-
-Name workspaces with `workspaces = ["web", "chat", "code"]` at the top of the
-config; they stay even when empty. A window rule's `workspace = "chat"` opens
-that app there, and `focus = false` keeps your view where it is.
-
-A setup is a list of apps with the workspace, mode and width each belongs at.
-Its `key` moves their open windows into place and launches the rest, placing
-their windows as they appear. Write the apps in `[setups.NAME]`, or leave them
-out and press its `save_key` to save the layout as it is to `setups.toml`.
-`[behavior] startup_setup` loads one when wm starts. The template has examples.
-
-Learned modes/widths stay in `%APPDATA%\wm\rules.txt`, saved on graceful exit.
-Explicit rule fields take precedence over remembered values; wm never overwrites
-your config while recording learned behavior.
-
-Windows that look like dialogs (no resize border, or the `#32770` dialog class)
-open floating, as in niri. Alt+T tiles one and is remembered for its kind;
-`[behavior] float_dialogs = false` turns this off.
-
-Other commands:
-
-```powershell
-cargo run -- config check       # Validate without tiling; does not reserve hotkeys
-cargo run -- config path        # Print the config location
-cargo run -- config defaults    # Print the full commented template
-cargo run -- --config C:\path\config.toml  # Use a different file
-cargo run -- list               # Inspect eligible/skipped windows
-cargo run -- do focus_right     # Post an action to the running WM
-cargo test
-```
-
-`wm do ACTION` posts a named action to the running WM and returns without
-waiting for it to run. The `[agent] allow` list controls which actions the WM
-accepts; it defaults to every action except `close` and `quit` and reloads on
-save. Add those names explicitly to allow them. Invalid or repeated names reject
-the configuration. Refused actions are logged. Hotkeys and bar commands are
-unaffected. The list of action names is in `[hotkeys]` in the config template.
-
-Alt+Shift+R manually retries a reload (useful after resolving a hotkey conflict).
-The config lists all other default keys; Alt+Shift+E or Ctrl+C quits and restores
-your windows.
-
-Animations are on by default: columns scroll, workspaces slide past like
-pages, and the overview zooms out of the desktop and back. Edit `[animations]`
-and its `horizontal`, `workspaces` and `overview` tables in the config. Each
-effect has `enabled` and `duration_ms`, the time a move takes to settle (0 to
-2000, where 0 is instant; 300 by default). `enabled = false` under
-`[animations]` turns them all off. Saving hot-reloads these settings.
-
-They are presentation only. Keyboard focus changes at once and the real windows
-go straight to where they end up; what moves is a live picture of each window
-on a see-through surface above the desktop, which lets clicks through and
-covers nothing else, so the wallpaper never flickers. The pictures appear
-exactly over the real windows before those are hidden, and the real windows
-are shown beneath the pictures before those go, so neither swap can be seen.
-
-The motion is springs, as in niri. A move eases in and out, and a key pressed
-mid-move bends it toward the new place at the speed it had instead of
-restarting, so holding a key down scrolls smoothly. Frames are paced by the
-compositor, one for each refresh of the screen, and only while something is
-moving. Opening, closing, dragging or resizing a window ends any motion at once.
-
-`cargo test the_stage_shows -- --ignored --nocapture`, from PowerShell, checks
-the surface on the real desktop: it slides a picture of a test window of its
-own and reads the screen back. It doesn't touch any other app's windows.
-
-These effects cover WM-managed windows and workspaces. They do not control tabs
-inside applications. This WM still manages one window per column.
-
-## Native top bar
-
-`wm-bar` is an optional, separate Rust process. It uses Win32/GDI with a cached
-font and backbuffer. It shows clickable workspaces, the focused window's mode
-and title, CPU usage, physical memory usage and a minute-aligned date/time.
-Click the title or mode to toggle overview;
-scroll over workspace buttons to switch up/down. Right-click anywhere to quit
-the bar. The bar never registers the WM's hotkeys or starts a tiling manager.
-
-Build both binaries:
+Requires Windows 10/11 and Rust. Run from **PowerShell** (Git Bash sets
+`__COMPAT_LAYER` and breaks DPI awareness). Stop other tiling managers or
+hotkey daemons first.
 
 ```powershell
 cargo build --workspace --release
+target\release\wm.exe config init   # creates %APPDATA%\wm\config.toml
+target\release\wm.exe               # Alt+Shift+E or Ctrl+C quits and restores windows
 ```
 
-In wm's existing `%APPDATA%\wm\config.toml`, set:
+## Keybindings
+
+Configurable in `config.toml` (supports multiple keys per action, e.g.
+`["Alt+H", "Alt+A"]`). Full list in [wm.default.toml](wm.default.toml).
+
+| Action | Default |
+| --- | --- |
+| Focus column / workspace | `Alt+H` `Alt+L` / `Alt+K` `Alt+J` |
+| Move window / across workspaces | `Alt+Shift+H` `Alt+Shift+L` / `Alt+Shift+K` `Alt+Shift+J` |
+| Switch / send to workspace 1–9 | `Alt+1..9` / `Alt+Shift+1..9` |
+| Cycle width / resize | `Alt+R` / `Alt+-` `Alt+=` |
+| Full width / float / sticky / on-top | `Alt+F` / `Alt+T` / `Alt+Shift+T` / `Ctrl+Alt+Shift+T` |
+| Overview | `Alt+O` |
+| Close / reload / quit | `Alt+Shift+W` / `Alt+Shift+R` / `Alt+Shift+E` |
+
+## Config
+
+`%APPDATA%\wm\config.toml` is created on first run and reloads on save. See
+[wm.default.toml](wm.default.toml) for all options:
+
+- **Workspaces:** `workspaces = ["web", "chat", "code"]` pins named workspaces
+  at the top; unnamed ones below appear and vanish automatically.
+- **Rules:** `[[window_rules]]` overrides learned modes/widths in `rules.txt`,
+  which override dialog auto-floating and defaults. `wm` never edits `config.toml`.
+- **Setups:** Define `[setups.<name>]` or bind `save_key` to snapshot layouts
+  to `setups.toml`; set `[behavior] startup_setup` to load one at startup.
+- **Animations & CLI:** Configure per-effect timing under `[animations]` and
+  allowed `wm do` actions under `[agent] allow`.
+
+## Commands
+
+```powershell
+wm [--config PATH]        # Start tiling
+wm list                   # List eligible and skipped windows
+wm do <action>            # Send an allowed action to the running WM
+wm config init|check|path|defaults
+```
+
+## Bar (`wm-bar`)
+
+Optional standalone Win32/GDI top bar with workspaces, focused mode/title
+(click for overview), clock, CPU, and memory. Drops behind fullscreen apps and
+uses no timers when `clock`/`cpu`/`memory` are disabled.
+
+Reserve space in `%APPDATA%\wm\config.toml` matching `bar.height` (`28` by default):
 
 ```toml
 [layout]
 reserved_top = 28
 ```
 
-Edit the existing section rather than adding a second `[layout]`. Save to reload.
-Start `target\release\wm.exe` and `target\release\wm-bar.exe` independently, in
-either order. For development, use `cargo run -p wm-bar`. An older WM binary
-must be restarted once to gain the bar integration.
-
-The bar creates `%APPDATA%\wm\bar.toml` once. Edit it to reorder/hide modules,
-change colors, font, height, padding, workspace button sizes and the clock
-format. Saves hot-reload; invalid edits keep the previous settings. See
-[bar.default.toml](crates/bar/bar.default.toml) for every setting and its default.
-Keep `bar.height` and wm's `layout.reserved_top` equal. There is no automatic
-height negotiation in this version.
-
-[themes/yasb.toml](crates/bar/themes/yasb.toml) matches the existing personal
-YASB styling: an 18px flat `#101010` strip, 11px Segoe UI regular text,
-Segoe MDL2 icons, gray workspace highlights, centered date/time and CPU/RAM on
-the right. Copy it to `%APPDATA%\wm\bar.toml` and set wm's `reserved_top = 18`.
-The rendering remains native Rust/GDI; YASB is not required. Keep the WM running
-when upgrading just the bar; close the bar with a right-click before replacing
-its executable, then start the new bar.
-Font selection requires scalable fonts and falls back to Segoe UI when a
-configured family is unavailable, preventing legacy bitmap substitutions on
-machines without Segoe UI Variable.
-
-Choose any installed scalable font by its family name in `[theme]`:
-
-```toml
-[theme]
-font = "Segoe UI"
-font_size = 11
-font_weight = 400
-```
-
-`wm-bar fonts` lists the family names GDI sees, including per-user fonts.
-An omitted or blank `font` defaults to Segoe UI; omitted size/weight default
-to 11px regular (400). Semibold (600) and bold (700) are wider/heavier at small
-sizes. Glyphs retain the font's natural proportions; widget widths only affect
-clipping and ellipsis. Save `bar.toml` to change the font without restarting.
-
-`cpu` samples busy processor time every 2000ms by default; `memory` samples
-physical RAM (total minus available) every 5000ms. Both intervals are configurable
-from 500 to 60000ms, and their timers stop when the module is removed. The first
-CPU percentage appears after one sampling interval; `--` means no valid sample.
-Memory can show `{percent}`, `{used_gib}` and `{total_gib}`; GiB uses 1024³ bytes.
-The clock supports `{weekday}` and `{month_name}` as English abbreviations in
-addition to numeric date/time fields.
+Start `target\release\wm-bar.exe` (in either order with `wm`); stop with
+`Stop-Process -Name wm-bar`. Configured via `%APPDATA%\wm\bar.toml`
+([bar.default.toml](crates/bar/bar.default.toml), 18px theme:
+[yasb.toml](crates/bar/themes/yasb.toml)).
 
 ```powershell
-cargo run -p wm-bar -- config init
-cargo run -p wm-bar -- config check
-cargo run -p wm-bar -- config path
-cargo run -p wm-bar -- config defaults
-cargo run -p wm-bar -- --config C:\path\bar.toml
-cargo test --workspace
+wm-bar fonts              # List installed scalable fonts
+wm-bar config init|check|path|defaults [--config PATH]
 ```
 
-This version targets the primary monitor and a single bar. It uses manual
-reserved space rather than a Windows AppBar: maximized floating/unmanaged
-windows can extend behind it, and reserved space remains if the bar closes.
-Large workspace lists show a page around the active workspace. A disconnected
-bar shows `Offline` and reconnects when a WM with bar support starts again.
+## Status & testing
 
-The WM publishes a 56-byte atomic shared-memory snapshot after logical state
-changes and posts one outstanding notification. Commands are posted back to a
-hidden WM window and use the same actions as hotkeys. Stale workspace clicks
-are rejected if the state changed before delivery. There are no pipe workers,
-JSON serialization, external processes or bar waits in the hotkey path. The
-bar tracks title changes only on the focused window's thread. Its message loop
-waits for input and directory notifications; the clock wakes once per minute.
-Remove `cpu`, `memory` and `clock` from the module lists to disable periodic
-timers entirely. Sampling is confined to the bar; the WM's input path is unchanged.
-The private protocol is versioned; build both binaries from the same checkout.
+Currently targets the primary monitor and one window per column.
+
+```powershell
+cargo test --workspace
+```
