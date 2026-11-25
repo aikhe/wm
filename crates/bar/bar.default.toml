@@ -23,7 +23,7 @@ title_max_width = 320
 # [] hides a group. Removing cpu/memory stops their sampling timers.
 # A module may occur only once across the three groups.
 # Click a workspace to switch; scroll it to move up/down through workspaces.
-# Click the title or mode to toggle overview. Right-click anywhere to exit.
+# Click the title or mode to toggle overview.
 left = ["workspaces", "mode"]
 center = ["title"]
 right = ["cpu", "memory", "clock"]

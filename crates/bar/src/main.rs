@@ -32,7 +32,7 @@ fn execute() -> Result<(), Box<dyn std::error::Error>> {
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
     {
         println!(
-            "wm-bar [--config PATH]   Run the separate native bar (right-click to quit).\nwm-bar fonts              List installed scalable font families.\nwm-bar config init        Create the commented defaults without overwriting.\nwm-bar config check       Validate without showing a bar.\nwm-bar config path        Print the config path.\nwm-bar config defaults    Print all defaults.\nSave the config to reload. All commands accept --config PATH.\nSet wm's [layout] reserved_top to the bar's height (28 by default)."
+            "wm-bar [--config PATH]   Run the separate native bar.\nwm-bar fonts              List installed scalable font families.\nwm-bar config init        Create the commented defaults without overwriting.\nwm-bar config check       Validate without showing a bar.\nwm-bar config path        Print the config path.\nwm-bar config defaults    Print all defaults.\nSave the config to reload. All commands accept --config PATH.\nSet wm's [layout] reserved_top to the bar's height (28 by default)."
         );
         return Ok(());
     }

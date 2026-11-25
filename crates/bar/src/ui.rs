@@ -37,8 +37,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetTimer, SetWindowPos,
     ShowWindow, SystemParametersInfoW, TranslateMessage, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CLOSE,
     WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMECHANGE, WM_TIMER,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_MOUSEWHEEL, WM_PAINT, WM_QUIT, WM_SETTINGCHANGE, WM_TIMECHANGE, WM_TIMER, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Error, PCWSTR, w};
 use wm_bar_protocol::{self as protocol, BAR_CLASS, Client, Command, Snapshot};
@@ -911,10 +911,7 @@ pub fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Erro
     let changes = Changes::new(&path)?;
     let mut view = View::new(config)?;
     let update = protocol::update_message();
-    println!(
-        "Bar config: {} (reloads on save). Right-click to quit.",
-        path.display()
-    );
+    println!("Bar config: {} (reloads on save).", path.display());
     println!(
         "Set wm's layout.reserved_top = {}. Start/stop either process independently.",
         view.config.bar.height
@@ -958,7 +955,7 @@ pub fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Erro
             }
             if message.hwnd == view.window.0 {
                 match message.message {
-                    WM_CLOSE | WM_RBUTTONUP => return Ok(()),
+                    WM_CLOSE => return Ok(()),
                     WM_PAINT => {
                         view.paint();
                         continue;
