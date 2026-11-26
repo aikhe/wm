@@ -54,7 +54,7 @@ impl Window {
     pub fn visible() -> Result<Vec<Window>> {
         unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
             let windows = unsafe { &mut *(lparam.0 as *mut Vec<Window>) };
-            if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            if Window(hwnd).is_visible() {
                 windows.push(Window(hwnd));
             }
             true.into()
@@ -76,6 +76,10 @@ impl Window {
         (!hwnd.is_invalid()).then_some(Window(hwnd))
     }
 
+    pub fn is_visible(self) -> bool {
+        unsafe { IsWindowVisible(self.0) }.as_bool()
+    }
+
     pub fn info(self) -> Info {
         let hwnd = self.0;
         let style = |index| unsafe { GetWindowLongW(hwnd, index) }.cast_unsigned();
@@ -84,7 +88,7 @@ impl Window {
             title: self.title(),
             class: self.class(),
             bounds: self.bounds(),
-            visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
+            visible: self.is_visible(),
             cloaked: self.cloaked(),
             minimized: unsafe { IsIconic(hwnd) }.as_bool(),
             owned: unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|owner| !owner.is_invalid()),
@@ -253,7 +257,7 @@ impl Window {
     /// hidden or minimized stays that way and returns there when next shown.
     pub fn restore(self, saved: Snapshot) {
         let hwnd = self.0;
-        let show = if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        let show = if !self.is_visible() {
             SW_HIDE
         } else if unsafe { IsIconic(hwnd) }.as_bool() {
             SW_SHOWMINNOACTIVE

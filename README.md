@@ -7,7 +7,8 @@ directly.
 ## Features
 
 - **Scrollable tiling & overview:** Horizontal columns per vertical workspace
-  (named or dynamic) with a live zoomed-out overview (`Alt+O`).
+  (named or dynamic) with a live zoomed-out overview (`Alt+O`). When a link
+  brings an existing browser window to the foreground, wm switches to its workspace.
 - **Instant input, zero idle CPU:** Single-thread Win32 loop with in-process
   hotkeys, non-blocking placement, optional Precision Touchpad swipes
   (`[gestures]`), and no idle polling.
