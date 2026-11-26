@@ -49,6 +49,7 @@ enum Home {
     Floating(usize),
     Sticky,
     OnTop,
+    Scratchpad,
 }
 
 /// A stack of workspaces with one of them on screen.
@@ -71,6 +72,10 @@ pub struct Workspaces<W> {
     sticky: Vec<W>,
     /// Sticky windows that are also kept above every other window.
     on_top: Vec<W>,
+    /// Stashed windows summoned floating on any workspace, in cycle order.
+    scratchpad: Vec<W>,
+    /// The scratchpad window currently shown on the active workspace, if any.
+    scratchpad_shown: Option<W>,
     /// The floating window that has focus, when one does. It shows on every
     /// workspace or belongs to the one on screen.
     floating_focus: Option<W>,
@@ -86,6 +91,8 @@ impl<W: Copy + PartialEq> Workspaces<W> {
             active: 0,
             sticky: Vec::new(),
             on_top: Vec::new(),
+            scratchpad: Vec::new(),
+            scratchpad_shown: None,
             floating_focus: None,
         }
     }
@@ -98,10 +105,79 @@ impl<W: Copy + PartialEq> Workspaces<W> {
     pub fn mode(&self, window: W) -> Option<Mode> {
         self.home(window).map(|home| match home {
             Home::Tiled(_) => Mode::Tiled,
-            Home::Floating(_) => Mode::Floating,
+            Home::Floating(_) | Home::Scratchpad => Mode::Floating,
             Home::Sticky => Mode::Sticky,
             Home::OnTop => Mode::OnTop,
         })
+    }
+
+    pub fn is_scratchpad(&self, window: W) -> bool {
+        self.scratchpad.contains(&window)
+    }
+
+    pub fn scratchpad_shown(&self) -> Option<W> {
+        self.scratchpad_shown
+    }
+
+    /// Counts of `(tiled, floating_or_pinned, scratchpad)` windows.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        let tiled: usize = self
+            .stack
+            .iter()
+            .map(|workspace| workspace.strip.placements().count())
+            .sum();
+        let floating: usize = self
+            .stack
+            .iter()
+            .map(|workspace| workspace.floating.len())
+            .sum::<usize>()
+            + self.sticky.len()
+            + self.on_top.len();
+        (tiled, floating, self.scratchpad.len())
+    }
+
+    /// Adds a window straight into the scratchpad hidden, used when restoring
+    /// a saved session.
+    pub fn add_scratchpad(&mut self, window: W) {
+        self.detach(window);
+        self.scratchpad.push(window);
+        self.tidy();
+    }
+
+    /// Moves the focused window into the scratchpad (hidden), or tiles a shown
+    /// scratchpad window onto the active workspace. Returns `(window, stashed)`.
+    pub fn scratchpad_mark(&mut self, width: Option<Width>) -> Option<(W, bool)> {
+        let window = self.focused()?;
+        if self.is_scratchpad(window) {
+            self.detach(window);
+            self.insert(window, Mode::Tiled, width);
+            Some((window, false))
+        } else {
+            self.detach(window);
+            self.scratchpad.push(window);
+            self.tidy();
+            Some((window, true))
+        }
+    }
+
+    /// Summons the next scratchpad window onto the active workspace, or hides
+    /// the one currently shown and rotates it to the back of the queue.
+    /// Returns `(window, shown)`.
+    pub fn scratchpad_toggle(&mut self) -> Option<(W, bool)> {
+        if let Some(shown) = self.scratchpad_shown.take() {
+            if self.floating_focus == Some(shown) {
+                self.floating_focus = None;
+            }
+            if let Some(index) = self.scratchpad.iter().position(|kept| *kept == shown) {
+                self.scratchpad.remove(index);
+                self.scratchpad.push(shown);
+            }
+            return Some((shown, false));
+        }
+        let next = *self.scratchpad.first()?;
+        self.scratchpad_shown = Some(next);
+        self.floating_focus = Some(next);
+        Some((next, true))
     }
 
     /// The width of the window's column, or `None` if it isn't tiled.
@@ -183,7 +259,7 @@ impl<W: Copy + PartialEq> Workspaces<W> {
     pub fn workspace_of(&self, window: W) -> Option<usize> {
         match self.home(window)? {
             Home::Tiled(index) | Home::Floating(index) => Some(index),
-            Home::Sticky | Home::OnTop => None,
+            Home::Sticky | Home::OnTop | Home::Scratchpad => None,
         }
     }
 
@@ -310,6 +386,10 @@ impl<W: Copy + PartialEq> Workspaces<W> {
             }
             Home::Floating(_) => Some(window),
             Home::Sticky | Home::OnTop => Some(window),
+            Home::Scratchpad => {
+                self.scratchpad_shown = Some(window);
+                Some(window)
+            }
         };
         self.tidy();
         true
@@ -398,7 +478,15 @@ impl<W: Copy + PartialEq> Workspaces<W> {
                 tiled.chain(floating.map(move |window| float(window, index)))
             });
         let everywhere = self.sticky.iter().chain(&self.on_top);
+        let shown = self.scratchpad_shown;
+        let scratch = self.scratchpad.iter().map(move |window| Placement {
+            window: *window,
+            workspace: active,
+            rect: None,
+            visible: shown == Some(*window),
+        });
         kept.chain(everywhere.map(move |window| float(window, active)))
+            .chain(scratch)
     }
 
     fn home(&self, window: W) -> Option<Home> {
@@ -407,6 +495,9 @@ impl<W: Copy + PartialEq> Workspaces<W> {
         }
         if self.on_top.contains(&window) {
             return Some(Home::OnTop);
+        }
+        if self.scratchpad.contains(&window) {
+            return Some(Home::Scratchpad);
         }
         self.stack
             .iter()
@@ -436,6 +527,12 @@ impl<W: Copy + PartialEq> Workspaces<W> {
             Home::Floating(index) => self.stack[index].floating.retain(|kept| *kept != window),
             Home::Sticky => self.sticky.retain(|kept| *kept != window),
             Home::OnTop => self.on_top.retain(|kept| *kept != window),
+            Home::Scratchpad => {
+                self.scratchpad.retain(|kept| *kept != window);
+                if self.scratchpad_shown == Some(window) {
+                    self.scratchpad_shown = None;
+                }
+            }
         }
         if self.floating_focus == Some(window) {
             self.floating_focus = None;
@@ -480,18 +577,24 @@ impl<W: Copy + PartialEq> Workspaces<W> {
         self.floating_focus = back.filter(|window| match self.home(*window) {
             Some(Home::Floating(index)) => index == target,
             Some(Home::Sticky | Home::OnTop) => true,
-            Some(Home::Tiled(_)) | None => false,
+            Some(Home::Tiled(_) | Home::Scratchpad) | None => false,
         });
         self.tidy();
         true
     }
 
     /// Makes `target` the workspace on screen, remembering which floating
-    /// window had focus on the one left. Returns the one that had focus when
-    /// `target` was left.
+    /// window had focus on the one left. Any shown scratchpad window hides
+    /// when leaving a workspace. Returns the one that had focus when `target`
+    /// was left.
     fn leave(&mut self, target: usize) -> Option<W> {
         if target == self.active {
             return None;
+        }
+        if let Some(shown) = self.scratchpad_shown.take()
+            && self.floating_focus == Some(shown)
+        {
+            self.floating_focus = None;
         }
         self.stack[self.active].left_focus = self.floating_focus.take();
         self.active = target;
@@ -512,6 +615,11 @@ impl<W: Copy + PartialEq> Workspaces<W> {
                     return false;
                 };
                 self.stack[target].strip.insert_column(column);
+            }
+            Some(window) if self.scratchpad_shown == Some(window) => {
+                self.scratchpad_shown = None;
+                self.scratchpad.retain(|kept| *kept != window);
+                self.stack[target].floating.push(window);
             }
             Some(window) => {
                 let Some(index) = from.floating.iter().position(|kept| *kept == window) else {
@@ -886,5 +994,53 @@ mod tests {
             visible(&workspaces).is_empty(),
             "unpinned onto the workspace that was on screen"
         );
+    }
+
+    #[test]
+    fn scratchpad_stashes_summons_cycles_hides_on_switch_and_re_tiles() {
+        let mut workspaces = workspaces([1, 2, 3]);
+        assert_eq!(workspaces.scratchpad_toggle(), None);
+
+        // Stash focused window 3: reflows strip and hides 3.
+        assert_eq!(workspaces.scratchpad_mark(None), Some((3, true)));
+        assert_eq!(rows(&workspaces), [vec![1, 2], vec![]]);
+        assert!(workspaces.is_scratchpad(3));
+        assert_eq!(workspaces.focused(), Some(2));
+        assert!(!visible(&workspaces).contains(&3));
+
+        // Stash window 2 too so we can test cycling.
+        assert_eq!(workspaces.scratchpad_mark(None), Some((2, true)));
+        assert_eq!(workspaces.counts(), (1, 0, 2));
+
+        // Switch to empty workspace 2 and summon: 3 appears floating and focused.
+        workspaces.focus_toward(Direction::Down);
+        assert_eq!(workspaces.scratchpad_toggle(), Some((3, true)));
+        assert_eq!(workspaces.focused(), Some(3));
+        assert_eq!(visible(&workspaces), [3]);
+
+        // Hide rotates 3 to the back; next summon brings up 2.
+        assert_eq!(workspaces.scratchpad_toggle(), Some((3, false)));
+        assert!(visible(&workspaces).is_empty());
+        assert_eq!(workspaces.scratchpad_toggle(), Some((2, true)));
+        assert_eq!(workspaces.focused(), Some(2));
+
+        // Switching workspaces auto-hides the shown scratchpad window.
+        workspaces.focus_toward(Direction::Up);
+        assert_eq!(workspaces.scratchpad_shown(), None);
+        assert_eq!(visible(&workspaces), [1]);
+
+        // Summon 2 on workspace 1, then unmark tiles it into workspace 1.
+        assert_eq!(workspaces.scratchpad_toggle(), Some((2, true)));
+        assert_eq!(workspaces.scratchpad_mark(None), Some((2, false)));
+        assert!(!workspaces.is_scratchpad(2));
+        assert_eq!(rows(&workspaces)[0], [1, 2]);
+        assert_eq!(workspaces.focused(), Some(2));
+
+        // Sending a shown scratchpad window to another workspace leaves scratchpad.
+        assert_eq!(workspaces.scratchpad_toggle(), Some((3, true)));
+        assert!(workspaces.move_to_workspace(1));
+        assert!(!workspaces.is_scratchpad(3));
+        assert_eq!(workspaces.mode(3), Some(Mode::Floating));
+        assert_eq!(workspaces.workspace_of(3), Some(1));
     }
 }

@@ -20,6 +20,9 @@ pub enum Action {
     Resize(i32),
     ToggleFull,
     Toggle(Mode),
+    ScratchpadMark,
+    ScratchpadToggle,
+    TogglePause,
     Overview,
     Close,
     Quit,
@@ -29,7 +32,7 @@ pub enum Action {
     SaveSetup(usize),
 }
 
-pub const DEFAULTS: [(&str, &str, Action); 37] = [
+pub const DEFAULTS: [(&str, &str, Action); 40] = [
     ("focus_left", "Alt+H", Action::Focus(Direction::Left)),
     ("focus_right", "Alt+L", Action::Focus(Direction::Right)),
     ("focus_up", "Alt+K", Action::Focus(Direction::Up)),
@@ -67,6 +70,13 @@ pub const DEFAULTS: [(&str, &str, Action); 37] = [
         "Ctrl+Alt+Shift+T",
         Action::Toggle(Mode::OnTop),
     ),
+    (
+        "scratchpad_mark",
+        "Alt+Shift+Backslash",
+        Action::ScratchpadMark,
+    ),
+    ("scratchpad_toggle", "Alt+Backslash", Action::ScratchpadToggle),
+    ("toggle_pause", "Alt+Shift+P", Action::TogglePause),
     ("overview", "Alt+O", Action::Overview),
     ("close", "Alt+Shift+W", Action::Close),
     ("quit", "Alt+Shift+E", Action::Quit),
@@ -75,6 +85,21 @@ pub const DEFAULTS: [(&str, &str, Action); 37] = [
 
 pub fn action_index(name: &str) -> Option<usize> {
     DEFAULTS.iter().position(|(known, _, _)| *known == name)
+}
+
+/// The minimal set of hotkeys kept active while tiling is paused, so every
+/// other shortcut passes straight through to applications.
+pub fn pause_bindings(bindings: &[Binding]) -> Vec<Binding> {
+    bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.action,
+                Action::TogglePause | Action::Quit | Action::Reload
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -38,8 +38,8 @@ wrap_move = true
 # are open; more windows open where you are. Window rules still win.
 # Learned values stay in rules.txt and are written on graceful exit only.
 # Turning one off also stops using its learned values; it does not erase them.
-# Separately, windows still open when wm restarts go back to their workspaces
-# and columns, named or not (session.txt, also written on graceful exit).
+# Separately, windows still open when wm restarts (or crashes) go back to their
+# workspaces and columns, named or not (session.txt, saved atomically on change).
 remember_modes = true
 remember_widths = true
 remember_workspaces = true
@@ -66,7 +66,9 @@ allow = [
     "workspace_6", "workspace_7", "workspace_8", "workspace_9",
     "send_1", "send_2", "send_3", "send_4", "send_5", "send_6", "send_7", "send_8", "send_9",
     "cycle_width", "resize_narrower", "resize_wider", "toggle_full",
-    "toggle_float", "toggle_sticky", "toggle_top", "overview", "reload",
+    "toggle_float", "toggle_sticky", "toggle_top",
+    "scratchpad_mark", "scratchpad_toggle", "toggle_pause",
+    "overview", "reload",
 ]
 
 [animations]
@@ -114,6 +116,23 @@ arrow_keys = true
 # Enter and Escape close the overview on the highlighted window.
 enter_escape_close = true
 
+[gestures]
+# Precision Touchpad multi-finger swipe gestures driving the live thumbnail stage.
+# Disabled by default so they do not conflict with Windows' built-in 3-finger
+# swipe; set Windows Settings > Touchpad > Three-finger gestures to "Nothing"
+# before enabling.
+enabled = false
+# Number of fingers (3 or 4).
+fingers = 3
+# Swipe left moves focus right and swipe up moves workspace down.
+natural = true
+horizontal = true
+vertical = true
+# Minimum travel (percent of touchpad span, 5..60) to commit a slow swipe.
+threshold_percent = 15
+# Live drag scaling in percent (20..400).
+sensitivity = 100
+
 [hotkeys]
 # Bindings call actions directly in this process. No shell commands are spawned.
 # Omitted actions retain these defaults. Set an action to "" to disable it,
@@ -158,6 +177,9 @@ toggle_full = "Alt+F"
 toggle_float = "Alt+T"
 toggle_sticky = "Alt+Shift+T"
 toggle_top = "Ctrl+Alt+Shift+T"
+scratchpad_mark = "Alt+Shift+Backslash"
+scratchpad_toggle = "Alt+Backslash"
+toggle_pause = "Alt+Shift+P"
 overview = "Alt+O"
 close = "Alt+Shift+W"
 quit = "Alt+Shift+E"

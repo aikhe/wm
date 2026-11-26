@@ -22,6 +22,7 @@ struct Document {
     layout: Layout,
     behavior: Behavior,
     overview: Overview,
+    gestures: Gestures,
     animations: Animations,
     hotkeys: BTreeMap<String, Keys>,
     agent: Agent,
@@ -165,6 +166,32 @@ pub struct OverviewStyle {
     pub max_row_height: Fraction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Gestures {
+    pub enabled: bool,
+    pub fingers: u32,
+    pub natural: bool,
+    pub horizontal: bool,
+    pub vertical: bool,
+    pub threshold_percent: i32,
+    pub sensitivity: i32,
+}
+
+impl Default for Gestures {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fingers: 3,
+            natural: true,
+            horizontal: true,
+            vertical: true,
+            threshold_percent: 15,
+            sensitivity: 100,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WindowRule {
@@ -204,6 +231,7 @@ pub struct Config {
     pub layout: Layout,
     pub behavior: Behavior,
     pub overview: Overview,
+    pub gestures: Gestures,
     pub animations: Animations,
     pub options: Options,
     pub style: OverviewStyle,
@@ -234,6 +262,7 @@ impl Config {
             layout,
             behavior,
             overview,
+            gestures,
             animations,
             hotkeys,
             agent,
@@ -298,6 +327,16 @@ impl Config {
         if style.margin.0 * 2 >= style.margin.1 {
             return Err("overview.margin must be less than 1/2".into());
         }
+        if !(3..=4).contains(&gestures.fingers) {
+            return Err("gestures.fingers must be 3 or 4".into());
+        }
+        range(
+            "gestures.threshold_percent",
+            gestures.threshold_percent,
+            5,
+            60,
+        )?;
+        range("gestures.sensitivity", gestures.sensitivity, 20, 400)?;
         for (index, rule) in window_rules.iter().enumerate() {
             let conditions = [&rule.exe, &rule.class, &rule.title_contains];
             if !conditions.iter().any(|condition| condition.is_some())
@@ -396,6 +435,7 @@ impl Config {
             layout,
             behavior,
             overview,
+            gestures,
             animations,
             options,
             style,
@@ -570,6 +610,7 @@ mod tests {
         assert_eq!(example.agent_allow, empty.agent_allow);
         assert_eq!(example.options, empty.options);
         assert_eq!(example.style, empty.style);
+        assert_eq!(example.gestures, empty.gestures);
         assert_eq!(example.animations, empty.animations);
         // Serialize-free comparison catches every extra field's default too.
         let explicit: Document = toml::from_str(DEFAULT_CONFIG).unwrap();
@@ -585,6 +626,10 @@ mod tests {
         assert_eq!(
             format!("{:?}", explicit.overview),
             format!("{:?}", omitted.overview)
+        );
+        assert_eq!(
+            format!("{:?}", explicit.gestures),
+            format!("{:?}", omitted.gestures)
         );
         assert_eq!(explicit.hotkeys.len(), bindings::DEFAULTS.len());
     }
