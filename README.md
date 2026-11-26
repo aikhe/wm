@@ -13,8 +13,8 @@ directly.
 - **Smooth DWM animations:** Presentation-only spring motion via DWM thumbnails
   paced by `DwmFlush`; focus never waits for animations.
 - **Modes, rules & setups:** Floating, sticky, always-on-top, auto-floated
-  dialogs, `[[window_rules]]`, learned widths/modes (`rules.txt`), and saved
-  app layouts (`[setups.*]`).
+  dialogs, `[[window_rules]]`, learned widths/modes/workspaces (`rules.txt`),
+  and saved app layouts (`[setups.*]`).
 - **Atomic hot-reload:** Saving `%APPDATA%\wm\config.toml` reloads live;
   invalid edits keep the current setup working.
 - **Optional bar & CLI:** Separate Win32/GDI top bar (`wm-bar`) and allow-listed
@@ -54,8 +54,9 @@ Configurable in `config.toml` (supports multiple keys per action, e.g.
 
 - **Workspaces:** `workspaces = ["web", "chat", "code"]` pins named workspaces
   at the top; unnamed ones below appear and vanish automatically.
-- **Rules:** `[[window_rules]]` overrides learned modes/widths in `rules.txt`,
-  which override dialog auto-floating and defaults. `wm` never edits `config.toml`.
+- **Rules:** `[[window_rules]]` overrides learned modes/widths/named workspaces
+  in `rules.txt`, which override dialog auto-floating and defaults. `wm` never
+  edits `config.toml`.
 - **Setups:** Define `[setups.<name>]` or bind `save_key` to snapshot layouts
   to `setups.toml`; set `[behavior] startup_setup` to load one at startup.
 - **Animations & CLI:** Configure per-effect timing under `[animations]` and

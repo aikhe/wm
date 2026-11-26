@@ -451,6 +451,13 @@ impl Manager {
             self.apply();
             self.focus_layout();
             self.log(&name);
+            if matches!(
+                action,
+                Action::Send(_) | Action::Move(Direction::Up | Direction::Down)
+            ) && let Some(window) = self.layout.focused()
+            {
+                self.record_workspace(window);
+            }
         } else if self.config.behavior.log_events && !matches!(action, Action::Close) {
             println!("{name:<17} nothing to do");
         }
@@ -736,6 +743,7 @@ impl Manager {
                 } else {
                     previous.width
                 },
+                ..previous
             },
             opening,
         );
@@ -773,11 +781,18 @@ impl Manager {
             window.title(),
         );
         let opening = self.opening_mode(window);
+        let mut learned = self.rules.get(window, opening);
+        // Another window of an app that's open, as a browser opens one, stays
+        // on the workspace on screen.
+        let first = !self.kind_open(window, &exe, &class);
+        if !first {
+            learned.workspace = None;
+        }
         let joining = self.config.resolve_rule(
             &exe,
             &class,
             &title,
-            self.rules.get(window, opening),
+            learned,
             opening,
             self.layout.default_width(),
         );
@@ -785,7 +800,7 @@ impl Manager {
             Some(item) => (item, false),
             None => {
                 let Some(Joining {
-                    rule: Rule { mode, width },
+                    rule: Rule { mode, width, .. },
                     workspace,
                     focus,
                 }) = joining
@@ -807,6 +822,9 @@ impl Manager {
             self.remember(window);
         }
         self.layout.arrange(&[item]);
+        if first {
+            self.record_workspace(window);
+        }
         if focus {
             self.layout.focus(window);
         } else {
@@ -903,7 +921,7 @@ impl Manager {
             .chain(mates.iter().map(|(_, mate, _)| *mate))
             .find_map(|mate| self.layout.workspace_of(mate))
             .unwrap_or_else(|| self.workspace_index(app.workspace.as_ref()));
-        let learned = joining.map(|joining| joining.rule);
+        let learned = joining.map(|joining| &joining.rule);
         Some(Arranged {
             window,
             mode: app
@@ -974,6 +992,7 @@ impl Manager {
         self.layout.arrange(&items);
         for (window, before, after) in modes {
             self.changed_mode(window, before, after);
+            self.record_workspace(window);
         }
 
         let launches: Vec<_> = apps
@@ -1046,6 +1065,31 @@ impl Manager {
             "Saved setup {name}: {count} windows to {}",
             self.setups_file.display()
         ));
+    }
+
+    /// Makes the named workspace the window is on the one its kind opens on
+    /// while none of its windows are open, or the one on screen if it's on
+    /// an unnamed one.
+    fn record_workspace(&mut self, window: Window) {
+        if !self.config.behavior.remember_workspaces {
+            return;
+        }
+        // Shown on every workspace.
+        let Some(index) = self.layout.workspace_of(window) else {
+            return;
+        };
+        let workspace = self.layout.names().nth(index).flatten().map(str::to_owned);
+        let opening = self.opening_mode(window);
+        let rule = self.rules.get(window, opening);
+        self.rules.set(window, Rule { workspace, ..rule }, opening);
+    }
+
+    /// Whether another window of this one's kind is in the layout.
+    fn kind_open(&self, window: Window, exe: &str, class: &str) -> bool {
+        self.layout.placements().any(|placement| {
+            let other = placement.window;
+            other != window && other.class() == class && other.exe().as_deref() == Some(exe)
+        })
     }
 
     /// Records where the window sits now as its place when it isn't tiled.
