@@ -42,7 +42,8 @@ remember_widths = true
 # or use the standard dialog class. Rules and learned modes still win.
 float_dialogs = true
 # Raise floating windows above tiled windows when a tiled window takes focus.
-floating_above_tiled = true
+# Off, the focused window is on top.
+floating_above_tiled = false
 # Print window events and hotkey actions to the console. Errors always print.
 log_events = true
 # The setup (see [setups] below) to load when wm starts, or "" for none.
