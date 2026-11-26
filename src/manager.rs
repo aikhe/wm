@@ -542,7 +542,7 @@ impl Manager {
                 // zooms back out to the desktop as that window has it.
                 let closes = current && in_overview;
                 if closes {
-                    let placements = self.stacked();
+                    let placements = self.stacked(self.layout.focused());
                     self.overview
                         .close(&self.layout, &placements, &mut self.stage);
                 }
@@ -699,7 +699,7 @@ impl Manager {
     /// only hides once it has faded, well after: hiding the window that has
     /// the keyboard would leave Windows to choose the next one.
     fn close_overview(&mut self) {
-        let placements = self.stacked();
+        let placements = self.stacked(self.layout.focused());
         self.overview
             .close(&self.layout, &placements, &mut self.stage);
         // Sends the window off stage before it takes the keyboard.
@@ -1238,8 +1238,9 @@ impl Manager {
             },
             overview: self.overview.is_open(),
         });
+        // Choosing a window in the view leaves the real ones where they are.
         if self.overview.is_open() {
-            let placements = self.stacked();
+            let placements = self.stacked(None);
             self.overview
                 .show(&self.layout, &placements, &mut self.stage);
         }
@@ -1300,13 +1301,15 @@ impl Manager {
         }
     }
 
-    /// Every placement, bottom-most picture first, stacked as on the desktop.
-    fn stacked(&self) -> Vec<Placement<Window>> {
+    /// Every placement, bottom-most picture first, stacked as on the desktop
+    /// once `raised` has the keyboard.
+    fn stacked(&self, raised: Option<Window>) -> Vec<Placement<Window>> {
         let mut placements: Vec<_> = self.layout.placements().collect();
         stack_placements(
             &mut placements,
             &self.layout,
             self.config.behavior.floating_above_tiled,
+            raised,
             &Window::visible().unwrap_or_default(),
         );
         placements
@@ -1316,7 +1319,7 @@ impl Manager {
     /// now, which is where their pictures must first appear.
     fn scene(&self, shown: bool) -> Vec<SceneWindow<Window>> {
         let active = self.layout.active().0;
-        self.stacked()
+        self.stacked(self.layout.focused())
             .into_iter()
             .map(|item| {
                 let real = (shown && item.visible).then(|| item.window.bounds());
@@ -1447,14 +1450,14 @@ fn stack_placements<W: Copy + Eq>(
     placements: &mut [Placement<W>],
     layout: &Workspaces<W>,
     floating_above_tiled: bool,
+    raised: Option<W>,
     z_order: &[W],
 ) {
-    let focused = layout.focused();
     placements.sort_by_key(|item| {
         (
             layout.mode(item.window) == Some(Mode::OnTop),
             floating_above_tiled && item.rect.is_none(),
-            Some(item.window) == focused,
+            Some(item.window) == raised,
             Reverse(
                 z_order
                     .iter()
@@ -1531,13 +1534,39 @@ mod tests {
         assert_eq!(layout.focused(), Some(2));
         lower_occluding_tiles(&visible, &z_order, |_, _| panic!("already stacked"));
 
-        stack_placements(&mut visible, &layout, true, &z_order);
+        let focused = layout.focused();
+        stack_placements(&mut visible, &layout, true, focused, &z_order);
         assert_eq!(
             visible.iter().rev().map(|p| p.window).collect::<Vec<_>>(),
             [3, 4, 2, 5]
         );
-        stack_placements(&mut visible, &layout, false, &z_order);
+        stack_placements(&mut visible, &layout, false, focused, &z_order);
         assert_eq!(visible.last().unwrap().window, 2);
+    }
+
+    #[test]
+    fn choosing_a_tile_in_the_overview_keeps_a_float_above_it() {
+        let mut layout = Workspaces::new(
+            Rect {
+                width: 1000,
+                height: 600,
+                ..Rect::default()
+            },
+            10,
+        );
+        layout.insert(1, Mode::Tiled, None);
+        layout.insert(2, Mode::Floating, None);
+        layout.focus(1);
+
+        // The float was on top when the overview opened.
+        let z_order = [2, 1];
+        let mut placements: Vec<_> = layout.placements().collect();
+        stack_placements(&mut placements, &layout, false, None, &z_order);
+        assert_eq!(placements.last().unwrap().window, 2);
+
+        // Closing on the tile raises it, as taking the keyboard will.
+        stack_placements(&mut placements, &layout, false, Some(1), &z_order);
+        assert_eq!(placements.last().unwrap().window, 1);
     }
 
     #[test]
