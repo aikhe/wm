@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use std::{env, fs};
 
 use crate::layout::{Mode, Width};
-use crate::window::Window;
 
 /// A kind of window: its program's file name, then its window class.
 type Kind = (String, String);
@@ -70,20 +69,32 @@ impl Rules {
         }
     }
 
-    /// The rule for windows of this one's kind: its default mode, `opening`,
-    /// at the default width unless something else was set.
-    pub fn get(&self, window: Window, opening: Mode) -> Rule {
-        let rule = kind(window).and_then(|kind| self.rules.get(&kind).cloned());
+    #[cfg(test)]
+    pub fn empty() -> Self {
+        Rules {
+            path: None,
+            rules: BTreeMap::new(),
+            unsaved: false,
+        }
+    }
+
+    /// The rule for windows of this kind: its default mode, `opening`, at the
+    /// default width unless something else was set.
+    pub fn get_by(&self, exe: Option<&str>, class: &str, opening: Mode) -> Rule {
+        let rule = exe.and_then(|exe| {
+            self.rules
+                .get(&(exe.to_owned(), class.to_owned()))
+                .cloned()
+        });
         rule.unwrap_or(Rule::opening(opening))
     }
 
-    /// Sets the rule for windows of this one's kind, whose default mode is
-    /// `opening`. Nothing is written until `save`, so that no key press ever
-    /// waits on the disk.
-    pub fn set(&mut self, window: Window, rule: Rule, opening: Mode) {
-        let Some(kind) = kind(window) else {
+    /// Sets the rule for windows of this kind, whose default mode is `opening`.
+    pub fn set_by(&mut self, exe: Option<String>, class: String, rule: Rule, opening: Mode) {
+        let Some(exe) = exe else {
             return;
         };
+        let kind = (exe, class);
         let default = Rule::opening(opening);
         let old = if rule == default {
             self.rules.remove(&kind)
@@ -104,11 +115,6 @@ impl Rules {
             Err(error) => eprintln!("couldn't save {}: {error}", path.display()),
         }
     }
-}
-
-/// `None` for a window whose program can't be read, which gets no rule.
-fn kind(window: Window) -> Option<Kind> {
-    Some((window.exe()?, window.class()))
 }
 
 /// Lines that aren't a rule are skipped.

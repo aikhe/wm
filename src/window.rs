@@ -117,6 +117,7 @@ impl Window {
             .or_else(|| self.refuses_moves().then_some(Skip::Elevated))
     }
 
+    #[cfg(test)]
     pub fn is_tileable(self) -> bool {
         self.skip(&self.info()).is_none()
     }

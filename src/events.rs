@@ -2,7 +2,7 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
     EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
@@ -60,21 +60,55 @@ impl Event {
     }
 }
 
-/// Starts posting window events to the calling thread's queue as `MESSAGE`s.
-/// The hooks last until the process exits.
-pub fn listen() {
-    for (first, last) in RANGES {
-        unsafe {
-            SetWinEventHook(
-                first,
-                last,
-                None,
-                Some(forward),
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-            );
+/// Active WinEvent hooks. Unhooking on pause eliminates all hook overhead while
+/// tiling is suspended; `Drop` cleans them up on exit.
+pub struct Hooks {
+    handles: [Option<HWINEVENTHOOK>; RANGES.len()],
+}
+
+impl Hooks {
+    pub fn listen() -> Self {
+        let mut hooks = Self {
+            handles: [None; RANGES.len()],
+        };
+        hooks.rehook();
+        hooks
+    }
+
+    pub fn rehook(&mut self) {
+        for (slot, (first, last)) in self.handles.iter_mut().zip(RANGES) {
+            if slot.is_some() {
+                continue;
+            }
+            let hook = unsafe {
+                SetWinEventHook(
+                    first,
+                    last,
+                    None,
+                    Some(forward),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                )
+            };
+            if !hook.is_invalid() {
+                *slot = Some(hook);
+            }
         }
+    }
+
+    pub fn unhook(&mut self) {
+        for slot in &mut self.handles {
+            if let Some(hook) = slot.take() {
+                let _ = unsafe { UnhookWinEvent(hook) };
+            }
+        }
+    }
+}
+
+impl Drop for Hooks {
+    fn drop(&mut self) {
+        self.unhook();
     }
 }
 

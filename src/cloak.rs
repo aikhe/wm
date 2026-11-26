@@ -25,6 +25,11 @@ const IMMERSIVE_SHELL: GUID = GUID::from_u128(0xc2f03a33_21f5_47fa_b4bb_156362a2
 /// windows to bring back.
 const MARK: PCWSTR = w!("wm.cloaked");
 
+/// A window property left on the focused window while it waits off-stage
+/// beneath the screen during an animation, so startup can pull it back after
+/// a crash.
+const PARKED_MARK: PCWSTR = w!("wm.parked");
+
 const CLOAK: i32 = 2;
 const UNCLOAK: i32 = 0;
 
@@ -66,15 +71,15 @@ impl Cloaker {
         Ok(Cloaker { views: None })
     }
 
-    /// Cloaks or uncloaks the window. A window that Explorer won't cloak just
-    /// stays drawn, so failure is ignored.
-    pub fn set(&mut self, window: Window, cloaked: bool) {
+    /// Cloaks or uncloaks the window. Returns `false` if Explorer refused the
+    /// request, in which case the window stays as it was.
+    pub fn set(&mut self, window: Window, cloaked: bool) -> bool {
         // Explorer may have restarted since we connected, so a failure gets one
         // more try on a fresh connection.
         if self.try_set(window, cloaked).is_err() {
             self.views = None;
             if self.try_set(window, cloaked).is_err() {
-                return;
+                return false;
             }
         }
 
@@ -85,6 +90,7 @@ impl Cloaker {
                 RemovePropW(window.0, MARK).map(drop)
             }
         };
+        true
     }
 
     /// Uncloaks every window we cloaked, in this run or an earlier one that
@@ -116,6 +122,27 @@ impl Cloaker {
 /// Whether we cloaked this window, as opposed to Windows or another app.
 pub fn is_cloaked(window: Window) -> bool {
     !unsafe { GetPropW(window.0, MARK) }.0.is_null()
+}
+
+/// Marks a window while it is parked off-stage beneath the screen during an
+/// animation, so a crash can detect and pull it back on startup.
+pub fn mark_parked(window: Window, parked: bool) {
+    let _ = unsafe {
+        if parked {
+            SetPropW(
+                window.0,
+                PARKED_MARK,
+                Some(HANDLE(std::ptr::dangling_mut())),
+            )
+        } else {
+            RemovePropW(window.0, PARKED_MARK).map(drop)
+        }
+    };
+}
+
+/// Whether this window was left off-stage by an interrupted animation.
+pub fn is_parked(window: Window) -> bool {
+    !unsafe { GetPropW(window.0, PARKED_MARK) }.0.is_null()
 }
 
 fn connect() -> Result<IApplicationViewCollection> {

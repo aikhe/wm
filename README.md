@@ -9,16 +9,18 @@ directly.
 - **Scrollable tiling & overview:** Horizontal columns per vertical workspace
   (named or dynamic) with a live zoomed-out overview (`Alt+O`).
 - **Instant input, zero idle CPU:** Single-thread Win32 loop with in-process
-  hotkeys, non-blocking placement, and no idle polling.
+  hotkeys, non-blocking placement, optional Precision Touchpad swipes
+  (`[gestures]`), and no idle polling.
 - **Smooth DWM animations:** Presentation-only spring motion via DWM thumbnails
   paced by `DwmFlush`; focus never waits for animations.
-- **Modes, rules & setups:** Floating, sticky, always-on-top, auto-floated
-  dialogs, `[[window_rules]]`, learned widths/modes/workspaces (`rules.txt`),
-  and saved app layouts (`[setups.*]`).
+- **Modes, scratchpad, pause & rules:** Floating, sticky, always-on-top, cloaked
+  scratchpad (`Alt+\` / `Alt+Shift+\`), pause/resume (`Alt+Shift+P`),
+  auto-floated dialogs, `[[window_rules]]`, learned rules (`rules.txt`),
+  crash-safe session restore (`session.txt`), and saved setups (`[setups.*]`).
 - **Atomic hot-reload:** Saving `%APPDATA%\wm\config.toml` reloads live;
   invalid edits keep the current setup working.
-- **Optional bar & CLI:** Separate Win32/GDI top bar (`wm-bar`) and allow-listed
-  CLI actions (`wm do`).
+- **Optional bar & CLI:** Separate Win32/GDI top bar (`wm-bar`), lock-free
+  `wm status` / `wm doctor`, and allow-listed CLI actions (`wm do`).
 
 ## Quick start
 
@@ -44,6 +46,8 @@ Configurable in `config.toml` (supports multiple keys per action, e.g.
 | Switch / send to workspace 1–9 | `Alt+1..9` / `Alt+Shift+1..9` |
 | Cycle width / resize | `Alt+R` / `Alt+-` `Alt+=` |
 | Full width / float / sticky / on-top | `Alt+F` / `Alt+T` / `Alt+Shift+T` / `Ctrl+Alt+Shift+T` |
+| Scratchpad toggle / stash-or-tile | `Alt+\` / `Alt+Shift+\` |
+| Pause / resume tiling | `Alt+Shift+P` |
 | Overview | `Alt+O` |
 | Close / reload / quit | `Alt+Shift+W` / `Alt+Shift+R` / `Alt+Shift+E` |
 
@@ -57,19 +61,22 @@ Configurable in `config.toml` (supports multiple keys per action, e.g.
 - **Rules:** `[[window_rules]]` overrides learned modes/widths/named workspaces
   in `rules.txt`, which override dialog auto-floating and defaults. `wm` never
   edits `config.toml`.
-- **Restarts:** Windows still open when `wm` restarts go back to the workspace,
-  column, mode, and width they had (`session.txt`), and the startup setup is
-  skipped.
+- **Restarts & crashes:** Session state (workspaces, active workspace, columns,
+  modes, widths, and scratchpad) is saved atomically to `session.txt` as layout
+  changes, and any animation-parked window recovers automatically on startup.
 - **Setups:** Define `[setups.<name>]` or bind `save_key` to snapshot layouts
   to `setups.toml`; set `[behavior] startup_setup` to load one at startup.
-- **Animations & CLI:** Configure per-effect timing under `[animations]` and
-  allowed `wm do` actions under `[agent] allow`.
+- **Gestures, animations & CLI:** Configure Precision Touchpad swipes under
+  `[gestures]`, animations under `[animations]`, and allowed `wm do` actions
+  under `[agent] allow`.
 
 ## Commands
 
 ```powershell
 wm [--config PATH]        # Start tiling
 wm list                   # List eligible and skipped windows
+wm status                 # Read live state from the running WM
+wm doctor [--config PATH] # Check config, recovery markers, and anomalies
 wm do <action>            # Send an allowed action to the running WM
 wm config init|check|path|defaults
 ```
