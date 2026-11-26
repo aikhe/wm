@@ -25,6 +25,7 @@ use crate::frame_clock::FrameClock;
 use crate::layout::{Arranged, Direction, Mode, Placement, Rect, Width, Workspaces};
 use crate::overview::{Overview, Target};
 use crate::rules::{Rule, Rules};
+use crate::session::{self, Entry};
 use crate::setups::{self, App, Spot};
 use crate::stage::{self, SceneWindow, Stage};
 use crate::window::{Snapshot, Window};
@@ -279,8 +280,9 @@ impl Manager {
         }
     }
 
-    /// Adopts the windows already open, left to right as they sit on screen,
-    /// then loads the startup setup.
+    /// Puts the windows already open back where the last run left them, and
+    /// adopts the others left to right as they sit on screen, then loads the
+    /// startup setup if there was nothing to put back.
     fn new(config: Config, viewport: Rect, setups_file: PathBuf) -> Result<Self> {
         let mut layout = Workspaces::new(viewport, config.layout.gap);
         layout.configure(viewport, config.layout.gap, config.options.clone());
@@ -310,6 +312,11 @@ impl Manager {
             .map(|window| (window, window.info()))
             .filter(|(window, info)| window.skip(info).is_none())
             .collect();
+        let restored = manager.restore(open.iter().map(|(window, _)| *window).collect());
+        if !restored.is_empty() {
+            manager.log(&format!("restored {}", restored.len()));
+        }
+        open.retain(|(window, _)| !restored.contains(window));
         open.sort_by_key(|(_, info)| info.bounds.x);
         for (window, _) in open {
             if manager.adopt(window) {
@@ -322,7 +329,10 @@ impl Manager {
         {
             manager.layout.focus(window);
         }
-        if let Some(index) = manager.config.startup_setup {
+        // A restart keeps the layout it restored; the setup is for a fresh start.
+        if let Some(index) = manager.config.startup_setup
+            && restored.is_empty()
+        {
             manager.load_setup(index);
         }
         manager.apply();
@@ -1067,6 +1077,67 @@ impl Manager {
         ));
     }
 
+    /// Puts the open windows saved when the last run exited back as they were
+    /// kept, in one arrangement so the workspaces keep their order. Returns
+    /// the windows placed.
+    fn restore(&mut self, open: Vec<Window>) -> Vec<Window> {
+        let items: Vec<_> = session::load()
+            .into_iter()
+            .filter_map(|entry| {
+                let window = entry.window;
+                let (exe, class) = (window.exe()?, window.class());
+                if !open.contains(&window) || !entry.is(window, &exe, &class) {
+                    return None;
+                }
+                // A rule made since may have it ignored.
+                let opening = self.opening_mode(window);
+                self.config.resolve_rule(
+                    &exe,
+                    &class,
+                    &window.title(),
+                    self.rules.get(window, opening),
+                    opening,
+                    self.layout.default_width(),
+                )?;
+                Some(Arranged {
+                    window,
+                    mode: entry.mode,
+                    width: entry.width,
+                    workspace: entry.workspace,
+                    after: None,
+                })
+            })
+            .collect();
+        self.layout.arrange(&items);
+        for item in &items {
+            self.remember(item.window);
+            if item.mode == Mode::OnTop {
+                item.window.set_topmost(true);
+            }
+        }
+        items.iter().map(|item| item.window).collect()
+    }
+
+    /// The layout as `restore` takes it back.
+    fn session(&self) -> Vec<Entry> {
+        self.layout
+            .placements()
+            .filter_map(|placement| {
+                let window = placement.window;
+                Some(Entry {
+                    window,
+                    mode: self.layout.mode(window)?,
+                    // Not the one on screen for windows shown on every one,
+                    // which would make `arrange` open a workspace for it.
+                    workspace: self.layout.workspace_of(window).unwrap_or(0),
+                    exe: window.exe()?,
+                    class: window.class(),
+                    width: self.layout.width(window),
+                })
+            })
+            .collect()
+    }
+
     /// Makes the named workspace the window is on the one its kind opens on
     /// while none of its windows are open, or the one on screen if it's on
     /// an unnamed one.
@@ -1281,6 +1352,7 @@ impl Manager {
 impl Drop for Manager {
     fn drop(&mut self) {
         self.rules.save();
+        session::save(&self.session());
         self.cloaker.uncloak_all();
         for (window, snapshot) in &self.untiled {
             match self.layout.mode(*window) {

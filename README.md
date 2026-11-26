@@ -57,6 +57,9 @@ Configurable in `config.toml` (supports multiple keys per action, e.g.
 - **Rules:** `[[window_rules]]` overrides learned modes/widths/named workspaces
   in `rules.txt`, which override dialog auto-floating and defaults. `wm` never
   edits `config.toml`.
+- **Restarts:** Windows still open when `wm` restarts go back to the workspace,
+  column, mode, and width they had (`session.txt`), and the startup setup is
+  skipped.
 - **Setups:** Define `[setups.<name>]` or bind `save_key` to snapshot layouts
   to `setups.toml`; set `[behavior] startup_setup` to load one at startup.
 - **Animations & CLI:** Configure per-effect timing under `[animations]` and

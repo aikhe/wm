@@ -38,6 +38,8 @@ wrap_move = true
 # are open; more windows open where you are. Window rules still win.
 # Learned values stay in rules.txt and are written on graceful exit only.
 # Turning one off also stops using its learned values; it does not erase them.
+# Separately, windows still open when wm restarts go back to their workspaces
+# and columns, named or not (session.txt, also written on graceful exit).
 remember_modes = true
 remember_widths = true
 remember_workspaces = true
@@ -49,6 +51,7 @@ floating_above_tiled = true
 # Print window events and hotkey actions to the console. Errors always print.
 log_events = true
 # The setup (see [setups] below) to load when wm starts, or "" for none.
+# Skipped when wm restarts and puts back windows still open from its last run.
 startup_setup = ""
 
 [agent]

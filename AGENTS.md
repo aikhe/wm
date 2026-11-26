@@ -21,7 +21,8 @@ calling Win32 directly.
   `cargo test --workspace`, `cargo run -- list`, and `cargo run -- config check`.
   (Stop komorebi/whkd before tiling so they don't fight over windows/hotkeys.)
 - **Never write to `%APPDATA%\wm\`:** That holds live `config.toml`, `bar.toml`,
-  `setups.toml`, and `rules.txt`. Use `--config <temp-path>` for CLI checks.
+  `setups.toml`, `rules.txt`, and `session.txt`. Use `--config <temp-path>` for
+  CLI checks.
 - **Always use PowerShell:** Shells that set `__COMPAT_LAYER` (like Git Bash)
   force DPI-unaware and make `SetProcessDpiAwarenessContext` fail with
   `Access is denied`.
@@ -39,8 +40,9 @@ calling Win32 directly.
 - `src/stage.rs`, `src/animation.rs`, `src/frame_clock.rs`, `src/overview.rs`,
   `src/thumbnail.rs` — DWM thumbnail stage, springs, `DwmFlush` pacing, and
   overview backdrop.
-- `src/config.rs`, `src/config_watch.rs`, `src/rules.rs`, `src/setups.rs` —
-  TOML config, hot-reload watcher, learned `rules.txt`, and setups. Defaults:
+- `src/config.rs`, `src/config_watch.rs`, `src/rules.rs`, `src/setups.rs`,
+  `src/session.rs` — TOML config, hot-reload watcher, learned `rules.txt`,
+  setups, and `session.txt` restored on restart. Defaults:
   [wm.default.toml](wm.default.toml).
 - `crates/bar-protocol` — Private versioned shared-memory (`AtomicU64`) and
   window-message protocol for `wm`, `wm do`, and `wm-bar`.
@@ -121,7 +123,7 @@ Before finishing a change, check what applies:
 - **Layout:** pure logic and unit tests (`src/layout.rs`, `src/layout/workspaces.rs`).
 - **Presentation:** `stage.rs` animations and `overview.rs` clicks/highlights.
 - **Config:** `wm.default.toml` / `crates/bar/bar.default.toml`, atomic reload, `config check`.
-- **Persistence:** `[[window_rules]]`, `rules.txt`, and `setups.toml`.
+- **Persistence:** `[[window_rules]]`, `rules.txt`, `setups.toml`, and `session.txt`.
 - **External paths:** `wm do` / `[agent] allow` and `bar-protocol` / `wm-bar`.
 - **Docs:** update [README.md](README.md) only when user-facing behavior changes.
 
