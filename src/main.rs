@@ -11,6 +11,7 @@ mod layout;
 mod manager;
 mod overview;
 mod rules;
+mod session;
 mod setups;
 mod stage;
 mod thumbnail;

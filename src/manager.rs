@@ -26,6 +26,7 @@ use crate::frame_clock::FrameClock;
 use crate::layout::{Arranged, Direction, Mode, Placement, Rect, Width, Workspaces};
 use crate::overview::{Overview, Target};
 use crate::rules::{Rule, Rules};
+use crate::session::{self, Entry};
 use crate::setups::{self, App, Spot};
 use crate::stage::{self, SceneWindow, Stage};
 use crate::window::{Snapshot, Window};
@@ -280,8 +281,9 @@ impl Manager {
         }
     }
 
-    /// Adopts the windows already open, left to right as they sit on screen,
-    /// then loads the startup setup.
+    /// Puts the windows already open back where the last run left them, and
+    /// adopts the others left to right as they sit on screen, then loads the
+    /// startup setup if there was nothing to put back.
     fn new(config: Config, viewport: Rect, setups_file: PathBuf) -> Result<Self> {
         let mut layout = Workspaces::new(viewport, config.layout.gap);
         layout.configure(viewport, config.layout.gap, config.options.clone());
@@ -311,6 +313,11 @@ impl Manager {
             .map(|window| (window, window.info()))
             .filter(|(window, info)| window.skip(info).is_none())
             .collect();
+        let restored = manager.restore(open.iter().map(|(window, _)| *window).collect());
+        if !restored.is_empty() {
+            manager.log(&format!("restored {}", restored.len()));
+        }
+        open.retain(|(window, _)| !restored.contains(window));
         open.sort_by_key(|(_, info)| info.bounds.x);
         for (window, _) in open {
             if manager.adopt(window) {
@@ -323,7 +330,10 @@ impl Manager {
         {
             manager.layout.focus(window);
         }
-        if let Some(index) = manager.config.startup_setup {
+        // A restart keeps the layout it restored; the setup is for a fresh start.
+        if let Some(index) = manager.config.startup_setup
+            && restored.is_empty()
+        {
             manager.load_setup(index);
         }
         manager.apply();
@@ -452,6 +462,13 @@ impl Manager {
             self.apply();
             self.focus_layout();
             self.log(&name);
+            if matches!(
+                action,
+                Action::Send(_) | Action::Move(Direction::Up | Direction::Down)
+            ) && let Some(window) = self.layout.focused()
+            {
+                self.record_workspace(window);
+            }
         } else if self.config.behavior.log_events && !matches!(action, Action::Close) {
             println!("{name:<17} nothing to do");
         }
@@ -742,6 +759,7 @@ impl Manager {
                 } else {
                     previous.width
                 },
+                ..previous
             },
             opening,
         );
@@ -779,11 +797,18 @@ impl Manager {
             window.title(),
         );
         let opening = self.opening_mode(window);
+        let mut learned = self.rules.get(window, opening);
+        // Another window of an app that's open, as a browser opens one, stays
+        // on the workspace on screen.
+        let first = !self.kind_open(window, &exe, &class);
+        if !first {
+            learned.workspace = None;
+        }
         let joining = self.config.resolve_rule(
             &exe,
             &class,
             &title,
-            self.rules.get(window, opening),
+            learned,
             opening,
             self.layout.default_width(),
         );
@@ -791,7 +816,7 @@ impl Manager {
             Some(item) => (item, false),
             None => {
                 let Some(Joining {
-                    rule: Rule { mode, width },
+                    rule: Rule { mode, width, .. },
                     workspace,
                     focus,
                 }) = joining
@@ -813,6 +838,9 @@ impl Manager {
             self.remember(window);
         }
         self.layout.arrange(&[item]);
+        if first {
+            self.record_workspace(window);
+        }
         if focus {
             self.layout.focus(window);
         } else {
@@ -909,7 +937,7 @@ impl Manager {
             .chain(mates.iter().map(|(_, mate, _)| *mate))
             .find_map(|mate| self.layout.workspace_of(mate))
             .unwrap_or_else(|| self.workspace_index(app.workspace.as_ref()));
-        let learned = joining.map(|joining| joining.rule);
+        let learned = joining.map(|joining| &joining.rule);
         Some(Arranged {
             window,
             mode: app
@@ -980,6 +1008,7 @@ impl Manager {
         self.layout.arrange(&items);
         for (window, before, after) in modes {
             self.changed_mode(window, before, after);
+            self.record_workspace(window);
         }
 
         let launches: Vec<_> = apps
@@ -1052,6 +1081,92 @@ impl Manager {
             "Saved setup {name}: {count} windows to {}",
             self.setups_file.display()
         ));
+    }
+
+    /// Puts the open windows saved when the last run exited back as they were
+    /// kept, in one arrangement so the workspaces keep their order. Returns
+    /// the windows placed.
+    fn restore(&mut self, open: Vec<Window>) -> Vec<Window> {
+        let items: Vec<_> = session::load()
+            .into_iter()
+            .filter_map(|entry| {
+                let window = entry.window;
+                let (exe, class) = (window.exe()?, window.class());
+                if !open.contains(&window) || !entry.is(window, &exe, &class) {
+                    return None;
+                }
+                // A rule made since may have it ignored.
+                let opening = self.opening_mode(window);
+                self.config.resolve_rule(
+                    &exe,
+                    &class,
+                    &window.title(),
+                    self.rules.get(window, opening),
+                    opening,
+                    self.layout.default_width(),
+                )?;
+                Some(Arranged {
+                    window,
+                    mode: entry.mode,
+                    width: entry.width,
+                    workspace: entry.workspace,
+                    after: None,
+                })
+            })
+            .collect();
+        self.layout.arrange(&items);
+        for item in &items {
+            self.remember(item.window);
+            if item.mode == Mode::OnTop {
+                item.window.set_topmost(true);
+            }
+        }
+        items.iter().map(|item| item.window).collect()
+    }
+
+    /// The layout as `restore` takes it back.
+    fn session(&self) -> Vec<Entry> {
+        self.layout
+            .placements()
+            .filter_map(|placement| {
+                let window = placement.window;
+                Some(Entry {
+                    window,
+                    mode: self.layout.mode(window)?,
+                    // Not the one on screen for windows shown on every one,
+                    // which would make `arrange` open a workspace for it.
+                    workspace: self.layout.workspace_of(window).unwrap_or(0),
+                    exe: window.exe()?,
+                    class: window.class(),
+                    width: self.layout.width(window),
+                })
+            })
+            .collect()
+    }
+
+    /// Makes the named workspace the window is on the one its kind opens on
+    /// while none of its windows are open, or the one on screen if it's on
+    /// an unnamed one.
+    fn record_workspace(&mut self, window: Window) {
+        if !self.config.behavior.remember_workspaces {
+            return;
+        }
+        // Shown on every workspace.
+        let Some(index) = self.layout.workspace_of(window) else {
+            return;
+        };
+        let workspace = self.layout.names().nth(index).flatten().map(str::to_owned);
+        let opening = self.opening_mode(window);
+        let rule = self.rules.get(window, opening);
+        self.rules.set(window, Rule { workspace, ..rule }, opening);
+    }
+
+    /// Whether another window of this one's kind is in the layout.
+    fn kind_open(&self, window: Window, exe: &str, class: &str) -> bool {
+        self.layout.placements().any(|placement| {
+            let other = placement.window;
+            other != window && other.class() == class && other.exe().as_deref() == Some(exe)
+        })
     }
 
     /// Records where the window sits now as its place when it isn't tiled.
@@ -1261,6 +1376,7 @@ impl Manager {
 impl Drop for Manager {
     fn drop(&mut self) {
         self.rules.save();
+        session::save(&self.session());
         self.cloaker.uncloak_all();
         for (window, snapshot) in &self.untiled {
             match self.layout.mode(*window) {

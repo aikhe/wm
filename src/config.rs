@@ -93,6 +93,7 @@ pub struct Behavior {
     pub wrap_move: bool,
     pub remember_modes: bool,
     pub remember_widths: bool,
+    pub remember_workspaces: bool,
     pub float_dialogs: bool,
     pub floating_above_tiled: bool,
     pub log_events: bool,
@@ -106,6 +107,7 @@ impl Default for Behavior {
             wrap_move: true,
             remember_modes: true,
             remember_widths: true,
+            remember_workspaces: true,
             float_dialogs: true,
             floating_above_tiled: false,
             log_events: true,
@@ -442,6 +444,11 @@ impl Config {
         if !self.behavior.remember_widths {
             learned.width = None;
         }
+        // A workspace no longer named is forgotten.
+        let named = learned
+            .workspace
+            .take()
+            .filter(|name| self.behavior.remember_workspaces && self.workspaces.contains(name));
         let Some(rule) = self.window_rules.iter().find(|rule| {
             rule.exe
                 .as_ref()
@@ -454,7 +461,7 @@ impl Config {
         }) else {
             return Some(Joining {
                 rule: learned,
-                workspace: None,
+                workspace: named.map(Spot::Name),
                 focus: true,
             });
         };
@@ -473,7 +480,7 @@ impl Config {
         }
         Some(Joining {
             rule: learned,
-            workspace: rule.workspace.clone(),
+            workspace: rule.workspace.clone().or(named.map(Spot::Name)),
             focus: rule.focus.unwrap_or(true),
         })
     }
@@ -665,34 +672,60 @@ mod tests {
                 pixels: 640,
                 full: false,
             }),
+            workspace: None,
         };
         let matched = config
-            .resolve_rule("A.exe", "A", "title", learned, Mode::Tiled, 500)
+            .resolve_rule("A.exe", "A", "title", learned.clone(), Mode::Tiled, 500)
             .unwrap()
             .rule;
         assert_eq!(matched.mode, Mode::Floating);
         assert_eq!(matched.width, learned.width);
         assert!(
             config
-                .resolve_rule("a.exe", "B", "title", learned, Mode::Tiled, 500)
+                .resolve_rule("a.exe", "B", "title", learned.clone(), Mode::Tiled, 500)
                 .is_none()
         );
         assert_eq!(
             config
-                .resolve_rule("b.exe", "A", "title", learned, Mode::Tiled, 500)
+                .resolve_rule("b.exe", "A", "title", learned.clone(), Mode::Tiled, 500)
                 .map(|joining| joining.rule),
-            Some(learned)
+            Some(learned.clone())
         );
         let off = Config::parse("[behavior]\nremember_modes=false\nremember_widths=false").unwrap();
         assert_eq!(
             off.resolve_rule("b.exe", "A", "title", learned, Mode::Floating, 500)
                 .map(|joining| joining.rule),
-            Some(Rule {
-                mode: Mode::Floating,
-                width: None
-            }),
+            Some(Rule::opening(Mode::Floating)),
             "falls back to the window's default mode"
         );
+    }
+
+    #[test]
+    fn learned_workspaces_give_way_to_rules_and_need_their_name() {
+        let text = "workspaces=['web','chat']
+[[window_rules]]
+exe='discord.exe'
+workspace='chat'";
+        let config = Config::parse(text).unwrap();
+        let workspace = |config: &Config, exe: &str, name: &str| {
+            let learned = Rule {
+                workspace: Some(name.into()),
+                ..Rule::opening(Mode::Tiled)
+            };
+            config
+                .resolve_rule(exe, "C", "t", learned, Mode::Tiled, 500)
+                .unwrap()
+                .workspace
+        };
+        let web = Some(Spot::Name("web".into()));
+        assert_eq!(workspace(&config, "firefox.exe", "web"), web);
+        assert_eq!(
+            workspace(&config, "Discord.exe", "web"),
+            Some(Spot::Name("chat".into()))
+        );
+        assert_eq!(workspace(&config, "firefox.exe", "gone"), None);
+        let off = Config::parse("workspaces=['web']\n[behavior]\nremember_workspaces=false");
+        assert_eq!(workspace(&off.unwrap(), "firefox.exe", "web"), None);
     }
 
     #[test]
@@ -708,10 +741,7 @@ focus=false";
                 "Discord.exe",
                 "C",
                 "t",
-                Rule {
-                    mode: Mode::Tiled,
-                    width: None,
-                },
+                Rule::opening(Mode::Tiled),
                 Mode::Tiled,
                 500,
             )

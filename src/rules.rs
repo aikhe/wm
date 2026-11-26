@@ -1,11 +1,12 @@
-//! Remembers how each kind of window was last kept and how wide its column
-//! was, so the next one of that kind opens the same way, in this run or a
-//! later one.
+//! Remembers how each kind of window was last kept, how wide its column was
+//! and which named workspace it was on, so the next one of that kind opens
+//! the same way, in this run or a later one.
 //!
 //! The rules live in `%APPDATA%\wm\rules.txt`, one per line, with tabs
-//! between the mode, the program's file name, the window class and, when one
-//! was set, the column width in pixels and then `full`. A kind that opens in
-//! its default mode at the default width needs no rule.
+//! between the mode, the program's file name, the window class and, when set,
+//! the column width in pixels, `full`, and `@` before the workspace's name. A
+//! kind that opens in its default mode at the default width on the workspace
+//! on screen needs no rule.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -18,15 +19,29 @@ use crate::window::Window;
 type Kind = (String, String);
 
 /// How windows of one kind open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub mode: Mode,
     /// The width of the window's column whenever it's tiled, or `None` for
     /// the default.
     pub width: Option<Width>,
+    /// The named workspace the kind was last on, where it opens while none of
+    /// its windows are open. `None` for the workspace on screen.
+    pub workspace: Option<String>,
 }
 
-const MODES: [(Mode, &str); 4] = [
+impl Rule {
+    /// The rule of a kind without one, whose default mode is `mode`.
+    pub fn opening(mode: Mode) -> Self {
+        Rule {
+            mode,
+            width: None,
+            workspace: None,
+        }
+    }
+}
+
+pub const MODES: [(Mode, &str); 4] = [
     (Mode::Tiled, "tiled"),
     (Mode::Floating, "float"),
     (Mode::Sticky, "sticky"),
@@ -58,11 +73,8 @@ impl Rules {
     /// The rule for windows of this one's kind: its default mode, `opening`,
     /// at the default width unless something else was set.
     pub fn get(&self, window: Window, opening: Mode) -> Rule {
-        let rule = kind(window).and_then(|kind| self.rules.get(&kind).copied());
-        rule.unwrap_or(Rule {
-            mode: opening,
-            width: None,
-        })
+        let rule = kind(window).and_then(|kind| self.rules.get(&kind).cloned());
+        rule.unwrap_or(Rule::opening(opening))
     }
 
     /// Sets the rule for windows of this one's kind, whose default mode is
@@ -72,14 +84,11 @@ impl Rules {
         let Some(kind) = kind(window) else {
             return;
         };
-        let default = Rule {
-            mode: opening,
-            width: None,
-        };
+        let default = Rule::opening(opening);
         let old = if rule == default {
             self.rules.remove(&kind)
         } else {
-            self.rules.insert(kind, rule)
+            self.rules.insert(kind, rule.clone())
         };
         self.unsaved |= old.unwrap_or(default) != rule;
     }
@@ -108,10 +117,20 @@ fn parse(text: &str) -> BTreeMap<Kind, Rule> {
         let mut fields = line.split('\t');
         let (word, exe, class) = (fields.next()?, fields.next()?, fields.next()?);
         let (mode, _) = MODES.into_iter().find(|(_, known)| *known == word)?;
-        let pixels = fields.next().and_then(|pixels| pixels.parse().ok());
-        let full = fields.next() == Some("full");
-        let width = pixels.map(|pixels| Width { pixels, full });
-        Some(((exe.to_owned(), class.to_owned()), Rule { mode, width }))
+        let (mut pixels, mut full, mut workspace) = (None, false, None);
+        for field in fields {
+            match field.strip_prefix('@') {
+                Some(name) => workspace = Some(name.to_owned()),
+                None if field == "full" => full = true,
+                None => pixels = field.parse().ok().or(pixels),
+            }
+        }
+        let rule = Rule {
+            mode,
+            width: pixels.map(|pixels| Width { pixels, full }),
+            workspace,
+        };
+        Some(((exe.to_owned(), class.to_owned()), rule))
     };
     text.lines().filter_map(rule).collect()
 }
@@ -124,7 +143,11 @@ fn render(rules: &BTreeMap<Kind, Rule>) -> String {
             Some(Width { pixels, full: true }) => format!("\t{pixels}\tfull"),
             Some(Width { pixels, .. }) => format!("\t{pixels}"),
         };
-        Some(format!("{word}\t{exe}\t{class}{width}\n"))
+        let workspace = match &rule.workspace {
+            Some(name) => format!("\t@{name}"),
+            None => String::new(),
+        };
+        Some(format!("{word}\t{exe}\t{class}{width}{workspace}\n"))
     };
     rules.iter().filter_map(line).collect()
 }
@@ -135,9 +158,10 @@ mod tests {
 
     #[test]
     fn rules_survive_being_saved_and_read_back() {
-        let text = "top\tmpv.exe\tmpv\n\
+        let text = "tiled\tDiscord.exe\tChrome_WidgetWin_1\t@chat\n\
+                    top\tmpv.exe\tmpv\n\
                     float\tscrcpy.exe\tSDL_app\t640\n\
-                    tiled\twezterm-gui.exe\torg.wezfurlong.wezterm\t1264\tfull\n";
+                    tiled\twezterm-gui.exe\torg.wezfurlong.wezterm\t1264\tfull\t@code\n";
         assert_eq!(render(&parse(text)), text);
     }
 
@@ -145,10 +169,7 @@ mod tests {
     fn lines_that_are_not_rules_are_skipped() {
         let rules = parse("# mine\nwide\ta.exe\tA\nfloat\tb.exe\n\nsticky\tc.exe\tC\n");
         let kept: Vec<_> = rules.into_iter().collect();
-        let sticky = Rule {
-            mode: Mode::Sticky,
-            width: None,
-        };
+        let sticky = Rule::opening(Mode::Sticky);
         assert_eq!(kept, [(("c.exe".into(), "C".into()), sticky)]);
     }
 }

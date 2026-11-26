@@ -33,11 +33,16 @@ reserved_right = 0
 # Wrap at the ends for focus keys and move keys, respectively.
 wrap_focus = true
 wrap_move = true
-# Learn each executable + window class's last mode and column width.
+# Learn each executable + window class's last mode, column width, and named
+# workspace. An app opens on its learned workspace while none of its windows
+# are open; more windows open where you are. Window rules still win.
 # Learned values stay in rules.txt and are written on graceful exit only.
-# Turning either off also stops using its learned values; it does not erase them.
+# Turning one off also stops using its learned values; it does not erase them.
+# Separately, windows still open when wm restarts go back to their workspaces
+# and columns, named or not (session.txt, also written on graceful exit).
 remember_modes = true
 remember_widths = true
+remember_workspaces = true
 # Open dialog-like windows floating, as niri does: ones that can't be resized,
 # or use the standard dialog class. Rules and learned modes still win.
 float_dialogs = true
@@ -47,6 +52,7 @@ floating_above_tiled = false
 # Print window events and hotkey actions to the console. Errors always print.
 log_events = true
 # The setup (see [setups] below) to load when wm starts, or "" for none.
+# Skipped when wm restarts and puts back windows still open from its last run.
 startup_setup = ""
 
 [agent]
