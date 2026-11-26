@@ -1486,6 +1486,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn returning_to_a_workspace_stacks_real_floats_as_their_thumbnails_were_shown() {
+        let mut layout = Workspaces::new(
+            Rect {
+                width: 1000,
+                height: 600,
+                ..Rect::default()
+            },
+            10,
+        );
+        layout.insert(1, Mode::Tiled, None);
+        layout.focus_workspace(1);
+        layout.insert(2, Mode::Tiled, None);
+        layout.insert(5, Mode::Tiled, None);
+        layout.insert(3, Mode::Floating, None);
+        layout.insert(4, Mode::Floating, None);
+        layout.focus(2);
+        layout.focus_workspace(0);
+        layout.focus_workspace(1);
+
+        // Foreground tile, another workspace's tile, then a second tile
+        // between this workspace's floats.
+        let mut z_order = vec![2, 1, 3, 5, 4];
+        let mut visible: Vec<_> = layout.placements().filter(|p| p.visible).collect();
+        lower_occluding_tiles(&visible, &z_order.clone(), |tile, float| {
+            z_order.retain(|&w| w != tile);
+            let after = z_order.iter().position(|&w| w == float).unwrap() + 1;
+            z_order.insert(after, tile);
+        });
+        assert_eq!(z_order, [1, 3, 4, 2, 5]);
+        assert_eq!(layout.focused(), Some(2));
+        lower_occluding_tiles(&visible, &z_order, |_, _| panic!("already stacked"));
+
+        stack_placements(&mut visible, &layout, true, &z_order);
+        assert_eq!(
+            visible.iter().rev().map(|p| p.window).collect::<Vec<_>>(),
+            [3, 4, 2, 5]
+        );
+        stack_placements(&mut visible, &layout, false, &z_order);
+        assert_eq!(visible.last().unwrap().window, 2);
+    }
+
+    #[test]
     fn overview_uses_rebound_keys_and_keeps_navigation_and_exit_available() {
         let config = Config::parse("[hotkeys]\nfocus_left='Alt+U'\noverview='Alt+P'").unwrap();
         let action = |key, held| overview_action(key, held, &config.bindings, &config.overview);
