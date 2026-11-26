@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -489,6 +490,11 @@ impl Manager {
             // Windows uncloaks a window that takes the keyboard. One of ours
             // that has since lost it goes back out of sight.
             Event::Appeared(window) if self.layout.contains(window) => {
+                // Brought forward from another workspace, as a link does to
+                // the browser: follow it there.
+                if Window::foreground() == Some(window) && self.keyboard() != Some(window) {
+                    return self.handle(Event::Focused(window));
+                }
                 if cloak::is_cloaked(window) && !window.cloaked() && self.keyboard() != Some(window)
                 {
                     self.apply();
@@ -1099,6 +1105,7 @@ impl Manager {
         }
         let placed = std::mem::take(&mut self.placed);
         let keyboard = self.keyboard();
+        let holder = Window::foreground();
 
         for placement in self.layout.placements() {
             let Placement {
@@ -1120,6 +1127,12 @@ impl Manager {
                 }
             } else if !visible || veiled {
                 if !hidden {
+                    // Windows shows a cloaked window again while it has the
+                    // keyboard, so it goes to the desktop until the layout's
+                    // focused window takes it.
+                    if holder == Some(window) {
+                        Window::desktop().focus();
+                    }
                     self.cloaker.set(window, true);
                 }
             } else if marked {
@@ -1135,16 +1148,27 @@ impl Manager {
         }
     }
 
-    /// The desktop as the layout has it, bottom-most window first. With
-    /// `shown`, the windows on screen are where they really are right now,
-    /// which is where their pictures must first appear.
+    /// The desktop as the layout has it, bottom-most window first: stacked as
+    /// the real windows are, with the focused one raised as focus raises it.
+    /// With `shown`, the windows on screen are where they really are right
+    /// now, which is where their pictures must first appear.
     fn scene(&self, shown: bool) -> Vec<SceneWindow<Window>> {
         let active = self.layout.active().0;
+        let focused = self.layout.focused();
+        // Cloaked windows keep their place in it, so it holds for every workspace.
+        let stacking = Window::visible().unwrap_or_default();
         let mut placements: Vec<_> = self.layout.placements().collect();
         placements.sort_by_key(|item| {
             (
                 self.layout.mode(item.window) == Some(Mode::OnTop),
                 self.config.behavior.floating_above_tiled && item.rect.is_none(),
+                Some(item.window) == focused,
+                Reverse(
+                    stacking
+                        .iter()
+                        .position(|window| *window == item.window)
+                        .unwrap_or(usize::MAX),
+                ),
             )
         });
         placements

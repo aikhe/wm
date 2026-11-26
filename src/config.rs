@@ -107,7 +107,7 @@ impl Default for Behavior {
             remember_modes: true,
             remember_widths: true,
             float_dialogs: true,
-            floating_above_tiled: true,
+            floating_above_tiled: false,
             log_events: true,
             startup_setup: String::new(),
         }

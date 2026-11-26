@@ -4,6 +4,9 @@ use super::{Direction, Mode, Options, Placement, Rect, Step, Strip, Width};
 struct Workspace<W> {
     strip: Strip<W>,
     floating: Vec<W>,
+    /// The floating window that had focus when this workspace was left, which
+    /// gets it back on return.
+    left_focus: Option<W>,
     /// Named workspaces come from the config and stay when empty.
     name: Option<String>,
 }
@@ -13,6 +16,7 @@ impl<W: Copy + PartialEq> Workspace<W> {
         Workspace {
             strip: Strip::new(viewport, gap),
             floating: Vec::new(),
+            left_focus: None,
             name: None,
         }
     }
@@ -296,16 +300,15 @@ impl<W: Copy + PartialEq> Workspaces<W> {
         let Some(home) = self.home(window) else {
             return false;
         };
+        if let Home::Tiled(index) | Home::Floating(index) = home {
+            let _ = self.leave(index);
+        }
         self.floating_focus = match home {
             Home::Tiled(index) => {
-                self.active = index;
                 self.stack[index].strip.focus(window);
                 None
             }
-            Home::Floating(index) => {
-                self.active = index;
-                Some(window)
-            }
+            Home::Floating(_) => Some(window),
             Home::Sticky | Home::OnTop => Some(window),
         };
         self.tidy();
@@ -465,16 +468,34 @@ impl<W: Copy + PartialEq> Workspaces<W> {
             .is_some_and(|target| self.show(target))
     }
 
-    /// Puts the workspace at `target` on screen, with focus on its strip.
-    /// Returns `false` if it already is.
+    /// Puts the workspace at `target` on screen, with focus back on the window
+    /// that had it when that workspace was left. Returns `false` if it
+    /// already is.
     fn show(&mut self, target: usize) -> bool {
         if target == self.active {
             return false;
         }
-        self.active = target;
-        self.floating_focus = None;
+        let back = self.leave(target);
+        // It may have moved or closed since.
+        self.floating_focus = back.filter(|window| match self.home(*window) {
+            Some(Home::Floating(index)) => index == target,
+            Some(Home::Sticky | Home::OnTop) => true,
+            Some(Home::Tiled(_)) | None => false,
+        });
         self.tidy();
         true
+    }
+
+    /// Makes `target` the workspace on screen, remembering which floating
+    /// window had focus on the one left. Returns the one that had focus when
+    /// `target` was left.
+    fn leave(&mut self, target: usize) -> Option<W> {
+        if target == self.active {
+            return None;
+        }
+        self.stack[self.active].left_focus = self.floating_focus.take();
+        self.active = target;
+        self.stack[target].left_focus.take()
     }
 
     /// Moves the focused column or floating window to the workspace at
@@ -500,6 +521,7 @@ impl<W: Copy + PartialEq> Workspaces<W> {
                 self.stack[target].floating.push(window);
             }
         }
+        self.stack[target].left_focus = None;
         self.active = target;
         self.tidy();
         true
@@ -757,6 +779,31 @@ mod tests {
             rows(&workspaces),
             [vec![1, 3, 2], vec![]],
             "tiled beside the strip's focused column"
+        );
+    }
+
+    #[test]
+    fn returning_to_a_workspace_focuses_the_window_focused_when_it_was_left() {
+        let mut workspaces = workspaces([1, 2]);
+        workspaces.set_mode(2, Mode::Floating, None);
+        workspaces.focus_toward(Direction::Down);
+        workspaces.focus_toward(Direction::Up);
+        assert_eq!(workspaces.focused(), Some(2), "the floating window");
+
+        workspaces.focus(1);
+        workspaces.focus_toward(Direction::Down);
+        workspaces.focus_toward(Direction::Up);
+        assert_eq!(workspaces.focused(), Some(1), "the tiled window");
+
+        workspaces.focus(2);
+        workspaces.focus_toward(Direction::Down);
+        workspaces.focus(1);
+        workspaces.focus_toward(Direction::Down);
+        workspaces.focus_toward(Direction::Up);
+        assert_eq!(
+            workspaces.focused(),
+            Some(1),
+            "focus changed there since it was left"
         );
     }
 
