@@ -212,22 +212,28 @@ impl Overview {
     }
 
     /// Sends every window's picture to its place in the view, the highlight
-    /// with the focused one, and repaints the backdrop if it changed. Does
-    /// nothing while the view is closed.
-    pub fn show(&mut self, layout: &Workspaces<Window>, stage: &mut Stage) {
+    /// with the focused one, and repaints the backdrop if it changed. The
+    /// `placements` are the layout's, bottom-most picture first. Does nothing
+    /// while the view is closed.
+    pub fn show(
+        &mut self,
+        layout: &Workspaces<Window>,
+        placements: &[Placement<Window>],
+        stage: &mut Stage,
+    ) {
         if !self.open {
             return;
         }
         let (active, count) = layout.active();
         let map = Map::new(self.screen, layout.viewport(), count, &self.style);
-        let slides: Vec<_> = layout
-            .placements()
+        let slides: Vec<_> = placements
+            .iter()
             .map(|placement| {
                 let window = placement.window;
                 let rect = placement.rect.unwrap_or_else(|| window.bounds());
                 Slide {
                     window,
-                    from: self.desktop(active, &placement),
+                    from: self.desktop(active, placement),
                     to: map.card(placement.workspace, rect),
                 }
             })
@@ -270,15 +276,21 @@ impl Overview {
 
     /// Zooms back out to the desktop: the pictures return to where the real
     /// windows are and the backdrop fades away. Give another window the
-    /// keyboard first, or Windows picks one itself.
-    pub fn close(&mut self, layout: &Workspaces<Window>, stage: &mut Stage) {
+    /// keyboard first, or Windows picks one itself. The `placements` are
+    /// stacked as for `show`.
+    pub fn close(
+        &mut self,
+        layout: &Workspaces<Window>,
+        placements: &[Placement<Window>],
+        stage: &mut Stage,
+    ) {
         self.open = false;
         self.opening = false;
         let active = layout.active().0;
-        let slides: Vec<_> = layout
-            .placements()
+        let slides: Vec<_> = placements
+            .iter()
             .map(|placement| {
-                let rect = self.desktop(active, &placement);
+                let rect = self.desktop(active, placement);
                 Slide {
                     window: placement.window,
                     from: rect,

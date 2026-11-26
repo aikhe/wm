@@ -542,7 +542,9 @@ impl Manager {
                 // zooms back out to the desktop as that window has it.
                 let closes = current && in_overview;
                 if closes {
-                    self.overview.close(&self.layout, &mut self.stage);
+                    let placements = self.stacked();
+                    self.overview
+                        .close(&self.layout, &placements, &mut self.stage);
                 }
                 if focused && self.layout.mode(window) == Some(Mode::Tiled) {
                     self.stack_floats_above_tiles();
@@ -697,7 +699,9 @@ impl Manager {
     /// only hides once it has faded, well after: hiding the window that has
     /// the keyboard would leave Windows to choose the next one.
     fn close_overview(&mut self) {
-        self.overview.close(&self.layout, &mut self.stage);
+        let placements = self.stacked();
+        self.overview
+            .close(&self.layout, &placements, &mut self.stage);
         // Sends the window off stage before it takes the keyboard.
         self.apply();
         self.focus_layout();
@@ -1234,7 +1238,11 @@ impl Manager {
             },
             overview: self.overview.is_open(),
         });
-        self.overview.show(&self.layout, &mut self.stage);
+        if self.overview.is_open() {
+            let placements = self.stacked();
+            self.overview
+                .show(&self.layout, &placements, &mut self.stage);
+        }
         // The real windows stay as they are until the pictures cover them;
         // `tick` comes back here then.
         if self.stage.covering() {
@@ -1292,10 +1300,8 @@ impl Manager {
         }
     }
 
-    /// With `shown`, the windows on screen are where they really are right
-    /// now, which is where their pictures must first appear.
-    fn scene(&self, shown: bool) -> Vec<SceneWindow<Window>> {
-        let active = self.layout.active().0;
+    /// Every placement, bottom-most picture first, stacked as on the desktop.
+    fn stacked(&self) -> Vec<Placement<Window>> {
         let mut placements: Vec<_> = self.layout.placements().collect();
         stack_placements(
             &mut placements,
@@ -1304,6 +1310,13 @@ impl Manager {
             &Window::visible().unwrap_or_default(),
         );
         placements
+    }
+
+    /// With `shown`, the windows on screen are where they really are right
+    /// now, which is where their pictures must first appear.
+    fn scene(&self, shown: bool) -> Vec<SceneWindow<Window>> {
+        let active = self.layout.active().0;
+        self.stacked()
             .into_iter()
             .map(|item| {
                 let real = (shown && item.visible).then(|| item.window.bounds());
