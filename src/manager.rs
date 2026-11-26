@@ -509,7 +509,10 @@ impl Manager {
             Event::Appeared(window) if self.layout.contains(window) => {
                 // Brought forward from another workspace, as a link does to
                 // the browser: follow it there.
-                if Window::foreground() == Some(window) && self.keyboard() != Some(window) {
+                if Window::foreground() == Some(window)
+                    && self.keyboard() != Some(window)
+                    && !self.interim_focus(window)
+                {
                     return self.handle(Event::Focused(window));
                 }
                 if cloak::is_cloaked(window) && !window.cloaked() && self.keyboard() != Some(window)
@@ -534,7 +537,7 @@ impl Manager {
             // one that ends up focused; only that last one matters.
             Event::Focused(window) => {
                 let current = Window::foreground() == Some(window);
-                let focused = current && self.layout.focus(window);
+                let focused = current && !self.interim_focus(window) && self.layout.focus(window);
                 // Another window taking the keyboard ends the overview, which
                 // zooms back out to the desktop as that window has it.
                 let closes = current && in_overview;
@@ -674,6 +677,15 @@ impl Manager {
     /// overview or the desktop.
     fn keyboard(&self) -> Option<Window> {
         self.layout.focused().filter(|_| !self.overview.is_open())
+    }
+
+    /// Cloaking the outgoing window can temporarily give another staged
+    /// window focus before the destination can take it.
+    fn interim_focus(&self, window: Window) -> bool {
+        self.deferred
+            && !self.overview.is_open()
+            && self.layout.focused() != Some(window)
+            && self.stage.shows(window)
     }
 
     /// The window the keyboard belongs to when the overview doesn't have it.
