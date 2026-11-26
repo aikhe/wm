@@ -15,12 +15,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput}
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetForegroundWindow,
     GetShellWindow, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic, IsWindowVisible,
-    IsZoomed, PostMessageW, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+    GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindowVisible, IsZoomed,
+    PostMessageW, SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
     SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
     SetWindowPlacement, SetWindowPos, ShowWindowAsync, WINDOW_EX_STYLE, WINDOW_STYLE,
     WINDOWPLACEMENT, WM_CLOSE, WPF_ASYNCWINDOWPLACEMENT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
-    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_THICKFRAME,
 };
 use windows::core::{BOOL, PWSTR, Result};
 
@@ -194,9 +194,13 @@ impl Window {
         !maximized
     }
 
-    /// Brings the window above the other ordinary windows without focusing it.
-    pub fn raise(self) {
-        self.reorder(HWND_TOP);
+    pub fn topmost(self) -> bool {
+        let style = unsafe { GetWindowLongW(self.0, GWL_EXSTYLE) }.cast_unsigned();
+        style & WS_EX_TOPMOST.0 != 0
+    }
+
+    pub fn place_behind(self, other: Window) {
+        self.reorder(other.0);
     }
 
     /// Keeps the window above every ordinary window, or stops doing so.

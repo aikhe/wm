@@ -357,7 +357,7 @@ impl Manager {
                     .configure(config.style.clone(), config.animations.clone());
                 self.config = config;
                 self.apply();
-                self.raise_floating();
+                self.stack_floats_above_tiles();
                 println!("Config reloaded. App rules/default widths apply when windows next join.");
             }
             Err(error) => eprintln!("Config reload rejected; previous settings kept: {error}"),
@@ -545,7 +545,7 @@ impl Manager {
                     self.overview.close(&self.layout, &mut self.stage);
                 }
                 if focused && self.layout.mode(window) == Some(Mode::Tiled) {
-                    self.raise_floating();
+                    self.stack_floats_above_tiles();
                 }
                 focused || closes
             }
@@ -720,16 +720,26 @@ impl Manager {
         self.log("Click");
     }
 
-    /// Puts the floating windows on screen back above the tiled ones. A tiled
-    /// window comes to the top when it takes focus, which would bury them.
-    fn raise_floating(&self) {
-        if !self.config.behavior.floating_above_tiled {
+    fn stack_floats_above_tiles(&self) {
+        if !self.config.behavior.floating_above_tiled
+            || self.overview.is_open()
+            || self.stage.covering()
+        {
             return;
         }
-        self.layout
+        let mut visible: Vec<_> = self
+            .layout
             .placements()
-            .filter(|placement| placement.rect.is_none() && placement.visible)
-            .for_each(|placement| placement.window.raise());
+            .filter(|item| item.visible && !self.stage.veils(item.window))
+            .collect();
+        if !visible.iter().any(|p| p.rect.is_none()) {
+            return;
+        }
+        // Reordering across the topmost band can change a window's topmost style.
+        visible.retain(|p| !p.window.topmost());
+        if let Ok(z_order) = Window::visible() {
+            lower_occluding_tiles(&visible, &z_order, Window::place_behind);
+        }
     }
 
     /// Presses a mode key on the focused window, and makes that the mode new
@@ -1233,6 +1243,7 @@ impl Manager {
         let placed = std::mem::take(&mut self.placed);
         let keyboard = self.keyboard();
         let holder = Window::foreground();
+        let mut revealed = false;
 
         for placement in self.layout.placements() {
             let Placement {
@@ -1264,6 +1275,7 @@ impl Manager {
                 }
             } else if marked {
                 self.cloaker.set(window, false);
+                revealed = true;
             }
             let Some(rect) = rect else {
                 continue;
@@ -1273,31 +1285,24 @@ impl Manager {
                 self.placed.push((window, rect));
             }
         }
+        // A tile may already have taken focus while the floats were cloaked.
+        // Restore their order under the thumbnails before the stage clears.
+        if revealed {
+            self.stack_floats_above_tiles();
+        }
     }
 
-    /// The desktop as the layout has it, bottom-most window first: stacked as
-    /// the real windows are, with the focused one raised as focus raises it.
     /// With `shown`, the windows on screen are where they really are right
     /// now, which is where their pictures must first appear.
     fn scene(&self, shown: bool) -> Vec<SceneWindow<Window>> {
         let active = self.layout.active().0;
-        let focused = self.layout.focused();
-        // Cloaked windows keep their place in it, so it holds for every workspace.
-        let stacking = Window::visible().unwrap_or_default();
         let mut placements: Vec<_> = self.layout.placements().collect();
-        placements.sort_by_key(|item| {
-            (
-                self.layout.mode(item.window) == Some(Mode::OnTop),
-                self.config.behavior.floating_above_tiled && item.rect.is_none(),
-                Some(item.window) == focused,
-                Reverse(
-                    stacking
-                        .iter()
-                        .position(|window| *window == item.window)
-                        .unwrap_or(usize::MAX),
-                ),
-            )
-        });
+        stack_placements(
+            &mut placements,
+            &self.layout,
+            self.config.behavior.floating_above_tiled,
+            &Window::visible().unwrap_or_default(),
+        );
         placements
             .into_iter()
             .map(|item| {
@@ -1400,6 +1405,51 @@ impl Drop for Manager {
             }
         }
     }
+}
+
+/// HWND_TOP can leave a background float below the foreground tile. Move the
+/// tiles behind the lowest visible float instead, keeping the keyboard where
+/// it is. Walk bottom to top so successive inserts preserve tile order.
+fn lower_occluding_tiles<W: Copy + Eq>(
+    visible: &[Placement<W>],
+    z_order: &[W],
+    mut place_behind: impl FnMut(W, W),
+) {
+    let mut lowest_float = None;
+    for &window in z_order.iter().rev() {
+        let Some(item) = visible.iter().find(|p| p.window == window) else {
+            continue;
+        };
+        if item.rect.is_none() {
+            lowest_float.get_or_insert(window);
+        } else if let Some(anchor) = lowest_float {
+            place_behind(window, anchor);
+        }
+    }
+}
+
+/// Bottom-most thumbnail first. Cloaked windows keep their place in the
+/// system z-order.
+fn stack_placements<W: Copy + Eq>(
+    placements: &mut [Placement<W>],
+    layout: &Workspaces<W>,
+    floating_above_tiled: bool,
+    z_order: &[W],
+) {
+    let focused = layout.focused();
+    placements.sort_by_key(|item| {
+        (
+            layout.mode(item.window) == Some(Mode::OnTop),
+            floating_above_tiled && item.rect.is_none(),
+            Some(item.window) == focused,
+            Reverse(
+                z_order
+                    .iter()
+                    .position(|window| *window == item.window)
+                    .unwrap_or(usize::MAX),
+            ),
+        )
+    });
 }
 
 /// Where a window that belongs at `rect` waits while its picture stands in
