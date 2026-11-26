@@ -839,7 +839,7 @@ impl<P: Platform> Manager<P> {
                 .then(|| self.scene(true));
         let name = match event {
             Event::Appeared(_) => "opened",
-            Event::Vanished(_) | Event::Cloaked(_) => "hidden",
+            Event::Hidden(_) | Event::MinimizeStarted(_) | Event::Cloaked(_) => "hidden",
             Event::Destroyed(_) => "closed",
             Event::Focused(_) => "focused",
             Event::Moved(_) => "moved",
@@ -868,7 +868,9 @@ impl<P: Platform> Manager<P> {
                 false
             }
             Event::Appeared(window) => self.platform.is_tileable(window) && self.adopt(window),
-            Event::Vanished(window) => self.release(window),
+            // A queued hide can outlive an app showing its existing window again.
+            Event::Hidden(window) => !self.platform.is_visible(window) && self.release(window),
+            Event::MinimizeStarted(window) => self.release(window),
             // Our own cloaking lands here too, and so late that the window may
             // be back on screen by now. Only a window that someone else has
             // cloaked, and that still is, has left.
@@ -2019,6 +2021,12 @@ mod tests {
             self.foreground
         }
 
+        fn is_visible(&self, window: Window) -> bool {
+            self.windows
+                .get(&Self::key(window))
+                .is_some_and(|w| w.visible && !w.closed)
+        }
+
         fn desktop(&self) -> Window {
             self.desktop
         }
@@ -2351,6 +2359,55 @@ mod tests {
             None,
             "quit needs the full shortcut"
         );
+    }
+
+    #[test]
+    fn browser_raised_after_a_delayed_hide_keeps_its_workspace_and_focus() {
+        let mut p = FakePlatform::new();
+        let source = p.add(1, "mail.exe", 0);
+        let browser = p.add(2, "browser.exe", 500);
+        p.foreground = Some(browser);
+        let mut m = make_manager(
+            p,
+            "[animations]\nenabled=false\n[behavior]\nlog_events=false",
+        );
+        let _ = m.perform(Action::Move(Direction::Down), None);
+        let _ = m.perform(Action::Workspace(0), None);
+        assert_eq!(m.platform.foreground, Some(source));
+        assert!(m.platform.cloaked(browser));
+
+        // Windows has already shown and activated the browser for the link.
+        m.platform.windows.get_mut(&2).unwrap().cloaked = false;
+        m.platform.foreground = Some(browser);
+        m.handle(Event::Hidden(browser));
+        m.handle(Event::Appeared(browser));
+        m.handle(Event::Focused(source));
+
+        assert_eq!(m.layout.workspace_of(browser), Some(1));
+        assert_eq!(m.layout.active().0, 1);
+        assert_eq!(m.layout.focused(), Some(browser));
+        assert_eq!(m.platform.foreground, Some(browser));
+        assert!(!m.platform.is_marked_cloaked(browser));
+        assert!(m.platform.cloaked(source));
+    }
+
+    #[test]
+    fn hidden_and_minimizing_windows_still_leave_the_layout() {
+        let mut p = FakePlatform::new();
+        let hidden = p.add(1, "mail.exe", 0);
+        let minimizing = p.add(2, "browser.exe", 500);
+        let mut m = make_manager(
+            p,
+            "[animations]\nenabled=false\n[behavior]\nlog_events=false",
+        );
+
+        m.platform.windows.get_mut(&1).unwrap().visible = false;
+        m.handle(Event::Hidden(hidden));
+        assert!(!m.layout.contains(hidden));
+
+        // Windows announces minimization while the window can still be visible.
+        m.handle(Event::MinimizeStarted(minimizing));
+        assert!(!m.layout.contains(minimizing));
     }
 
     #[test]

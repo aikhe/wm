@@ -23,6 +23,7 @@ use crate::window::{Info, Skip, Snapshot, Window};
 
 pub trait Platform {
     fn visible_windows(&self) -> Vec<Window>;
+    fn is_visible(&self, window: Window) -> bool;
     fn foreground(&self) -> Option<Window>;
     fn desktop(&self) -> Window;
     fn info(&self, window: Window) -> Info;
@@ -122,6 +123,10 @@ impl Win32Platform {
 impl Platform for Win32Platform {
     fn visible_windows(&self) -> Vec<Window> {
         Window::visible().unwrap_or_default()
+    }
+
+    fn is_visible(&self, window: Window) -> bool {
+        window.is_visible()
     }
 
     fn foreground(&self) -> Option<Window> {

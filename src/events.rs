@@ -31,8 +31,8 @@ const RANGES: [(u32, u32); 5] = [
 pub enum Event {
     /// Shown, uncloaked or restored from minimized.
     Appeared(Window),
-    /// Hidden or minimized, but still alive.
-    Vanished(Window),
+    Hidden(Window),
+    MinimizeStarted(Window),
     /// Cloaked by Windows, another app, or us.
     Cloaked(Window),
     Destroyed(Window),
@@ -50,7 +50,8 @@ impl Event {
             EVENT_OBJECT_SHOW | EVENT_OBJECT_UNCLOAKED | EVENT_SYSTEM_MINIMIZEEND => {
                 Event::Appeared(window)
             }
-            EVENT_OBJECT_HIDE | EVENT_SYSTEM_MINIMIZESTART => Event::Vanished(window),
+            EVENT_OBJECT_HIDE => Event::Hidden(window),
+            EVENT_SYSTEM_MINIMIZESTART => Event::MinimizeStarted(window),
             EVENT_OBJECT_CLOAKED => Event::Cloaked(window),
             EVENT_OBJECT_DESTROY => Event::Destroyed(window),
             EVENT_SYSTEM_FOREGROUND => Event::Focused(window),
